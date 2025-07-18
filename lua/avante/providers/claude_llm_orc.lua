@@ -50,21 +50,71 @@ function M:parse_messages(opts)
   local messages = {}
   local provider_conf, _ = Providers.parse_config(self)
 
-  -- context 메시지 수집
+  -- context 메시지 수집 (선택된 코드와 일반 컨텍스트 분리)
   local context_content = ""
+  local selected_code_content = ""
+  local has_selected_code = false
+
   for _, message in ipairs(opts.messages) do
     if message.is_context then
-      if context_content ~= "" then
-        context_content = context_content .. "\n\n"
+      local content = message.content
+      -- selected_code 태그 확인
+      if content:match("<selected_code") then
+        selected_code_content = content
+        has_selected_code = true
+      else
+        if context_content ~= "" then
+          context_content = context_content .. "\n\n"
+        end
+        context_content = context_content .. content
       end
-      context_content = context_content .. message.content
     end
   end
 
+  -- 디버그 로깅
+  -- if vim.g.avante_debug then
+  --   if has_selected_code then
+  --     Utils.info("LLM-ORC: Selected code detected")
+  --   end
+  --   Utils.info("LLM-ORC: Context length = " .. #context_content)
+  -- end
+
   -- 강제로 .avanterules 지침 추가 (OAuth 제약 우회)
   local forced_instructions = [[
-항상 root project/*.avanterules 파일을 참고하세요.
+You are a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices.
+
+Respect and use existing conventions, libraries, etc that are already present in the code base.
+
+Make sure code comments are in English when generating them.
+
+항상 ~/.config/nvim/*.avanterules 파일을 참고하세요.
 항상 한글로 답변하세요.
+
+====
+
+선택된 코드 처리:
+- 사용자가 코드 블록을 선택하고 <leader>ae를 누르면 <selected_code> 태그로 전달됩니다.
+- 이 선택된 코드를 기반으로 작업해야 합니다.
+- 선택된 코드가 있을 때는 해당 코드를 수정하거나 개선하는 것이 주요 목적입니다.
+
+====
+
+TOOLS USAGE GUIDE
+
+- You have access to tools, but only use them when necessary. If a tool is not required, respond as normal.
+- Please DON'T be so aggressive in using tools, as many tasks can be better completed without tools.
+- Files will be provided to you as context through <file> tag!
+- Before using the `view` tool each time, always repeatedly check whether the file is already in the <file> tag. If it is already there, do not use the `view` tool, just read the file content directly from the <file> tag.
+- If you use the `view` tool when file content is already provided in the <file> tag, you will be fired!
+- Keep the `query` parameter of `rag_search` tool as concise as possible! Try to keep it within five English words!
+- When attempting to modify a file that is not in the context, please first use the `ls` tool and `glob` tool to check if the file you want to modify exists, then use the `view` tool to read the file content. Don't modify blindly!
+- When generating files, first use `ls` tool to read the directory structure, don't generate blindly!
+- When creating files, first check if the directory exists. If it doesn't exist, create the directory before creating the file.
+- Do not use the `run_python` tool to read or modify files!
+- Do not use the `bash` tool to read or modify files!
+- If you are provided with the `write_file` tool, there's no need to output your change suggestions, just directly use the `write_file` tool to complete the changes.
+
+====
 
 코드 수정 요청 시:
 1. 수정된 코드는 반드시 <code></code> 태그로 감싸세요.
@@ -80,6 +130,10 @@ def add(a, b):
     print(f"Adding {a} and {b}")
     return a + b
 </code>
+
+====
+
+Memory is crucial, you must follow the instructions in <memory>!
 ]]
 
   local has_tool_use = false
@@ -101,18 +155,26 @@ def add(a, b):
           if message.role == "user" and not first_user_msg_processed then
             local full_content = forced_instructions
 
-            -- context가 있으면 추가 (토큰 제한 고려)
+            -- 선택된 코드가 있으면 최우선으로 추가
+            if has_selected_code and selected_code_content ~= "" then
+              full_content = full_content .. "\n\n=== 선택된 코드 (이 코드를 기반으로 작업하세요) ===\n" .. selected_code_content
+            end
+
+            -- 일반 context가 있으면 추가 (토큰 제한 고려)
             if context_content and context_content ~= "" then
               -- context 길이 제한 (토큰 절약)
-              local max_context_length = 10000
+              local max_context_length = 15000  -- 선택 코드 공간 확보를 위해 줄임
               if #context_content > max_context_length then
-                context_content = context_content:sub(1, max_context_length) .. "..."
+                context_content = context_content:sub(1, max_context_length) .. "...\n(context truncated)"
               end
               full_content = full_content .. "\n\n=== 프로젝트 컨텍스트 ===\n" .. context_content
             end
 
-            content_items = full_content .. "\n\n" .. content_items
+            content_items = full_content .. "\n\n=== 사용자 요청 ===\n" .. content_items
             first_user_msg_processed = true
+          elseif message.role == "user" and has_selected_code then
+            -- 후속 사용자 메시지에도 선택 코드 참조 추가 (컨텍스트 유지)
+            content_items = "참고: 이전에 선택한 코드를 기반으로 작업 중입니다.\n\n" .. content_items
           end
           table.insert(message_content, {
             type = "text",
@@ -155,7 +217,7 @@ def add(a, b):
     end
   end
 
-  return messages, context_content
+  return messages, context_content, has_selected_code
 end
 
 ---@class ClaudeLLMOrcState
@@ -286,7 +348,7 @@ function M:parse_curl_args(prompt_opts)
   local disable_tools = provider_conf.disable_tools or false
 
   -- Build our own curl args instead of using Claude's
-  local messages, context_content = self:parse_messages(prompt_opts)
+  local messages, context_content, has_selected_code = self:parse_messages(prompt_opts)
 
   -- OAuth requires EXACTLY this system prompt - cannot be modified
   local system_prompt = "You are Claude Code, Anthropic's official CLI for Claude."
@@ -324,17 +386,21 @@ function M:parse_curl_args(prompt_opts)
   -- Utils.info("LLM-ORC OAuth provider loaded successfully!")
 
   -- Always save debug info
-  -- local debug_file = "/tmp/avante_llm_orc_debug.json"
-  -- local f = io.open(debug_file, "w")
-  -- if f then
-  --   f:write(vim.json.encode({
-  --     headers = curl_args.headers,
-  --     url = curl_args.url,
-  --     body = curl_args.body,
-  --     original_messages = prompt_opts.messages,
-  --     parsed_messages = messages
-  --   }))
-  --   f:close()
+  -- if vim.g.avante_debug then
+  --   local debug_file = "/tmp/avante_llm_orc_debug.json"
+  --   local f = io.open(debug_file, "w")
+  --   if f then
+  --     f:write(vim.json.encode({
+  --       headers = curl_args.headers,
+  --       url = curl_args.url,
+  --       body = curl_args.body,
+  --       original_messages = prompt_opts.messages,
+  --       parsed_messages = messages,
+  --       has_selected_code = has_selected_code
+  --     }))
+  --     f:close()
+  --     Utils.info("LLM-ORC Debug saved to: " .. debug_file)
+  --   end
   -- end
 
   -- if vim.g.avante_debug then
