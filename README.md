@@ -990,6 +990,310 @@ The process uses a specialized prompt format that includes:
 
 This approach ensures that the apply model can quickly and accurately merge your changes without the overhead of full code generation.
 
+## Claude via LLM-ORC
+
+llm-orc를 사용하여 Claude OAuth 인증을 처리하고, Avante에서 그 토큰을 사용하는 방법입니다.
+
+### 장점
+
+- ✅ 검증된 OAuth 구현 사용
+- ✅ llm-orc가 토큰 갱신 자동 처리
+- ✅ 암호화된 토큰 저장
+- ✅ 간단한 설정
+
+### 설치 및 설정
+
+#### 1. llm-orc 설치
+
+```bash
+# GitHub에서 직접 설치
+git clone https://github.com/mrilikecoding/llm-orc.git ~/.local/share/llm-orc
+cd ~/.local/share/llm-orc
+pip install .
+```
+
+#### 2. Claude OAuth 인증
+
+```bash
+# Claude Pro/Max OAuth 인증 추가
+llm-orc auth add anthropic-claude-pro-max
+```
+
+다음 단계를 따르세요:
+1. 브라우저가 자동으로 열립니다
+2. Claude에 로그인하고 권한을 승인합니다
+3. 리다이렉션된 페이지의 URL에서 `code=` 파라미터를 찾습니다
+4. 해당 코드를 터미널에 붙여넣습니다
+
+#### 3. 인증 확인
+
+```bash
+# 인증된 프로바이더 목록 확인
+llm-orc auth list
+
+# Claude 테스트
+llm-orc invoke validate-anthropic-claude-pro-max
+```
+
+#### 4. Avante 설정
+
+`~/.config/nvim/lua/plugins/avante.lua`에서:
+
+```lua
+providers = {
+    claude_llm_orc = {
+        -- __inherited_from을 제거하고 직접 구현
+        api_key_name = nil,  -- OAuth를 사용하므로 API key 불필요
+        endpoint = 'https://api.anthropic.com',
+        model = 'claude-sonnet-4-20250514',  -- 최신 모델명
+        extra_request_body = {
+            temperature = 0,
+            max_tokens = 4096,
+        },
+    },
+}
+```
+
+#### 5. Provider 전환
+
+```vim
+:AvanteSwitchProvider claude_llm_orc
+```
+
+### 사용 방법
+
+llm-orc가 인증을 처리하므로, Avante에서는 추가 인증 없이 바로 사용할 수 있습니다:
+
+```vim
+" Claude와 대화 시작
+:AvanteChat
+
+" 코드에 대해 질문
+:AvanteAsk
+```
+
+### 토큰 관리
+
+llm-orc가 자동으로 토큰을 관리합니다:
+
+- 토큰 위치: `~/.config/llm-orc/credentials.yaml` (암호화됨)
+- 암호화 키: `~/.config/llm-orc/.encryption_key`
+
+#### 토큰 만료 확인
+
+토큰이 만료되었는지 확인하려면:
+
+```bash
+llm-orc invoke validate-anthropic-claude-pro-max
+```
+
+다음과 같은 메시지가 나오면 토큰이 만료된 것입니다:
+```
+Agent Results:
+  validator: ERROR - Token expired - refresh needed
+```
+
+#### 토큰 갱신
+
+토큰이 만료되면 다시 인증하세요:
+
+```bash
+llm-orc auth add anthropic-claude-pro-max
+```
+
+#### 로그아웃
+
+```bash
+llm-orc auth remove anthropic-claude-pro-max
+```
+
+### 문제 해결
+
+#### Python 의존성 오류
+
+```bash
+pip install cryptography pyyaml
+```
+
+#### 토큰 복호화 실패
+
+1. llm-orc 재설치
+2. 인증 다시 수행
+
+#### Provider를 찾을 수 없음
+
+Neovim을 재시작하고 다시 시도하세요.
+
+### 추가 llm-orc 기능
+
+llm-orc는 Claude 외에도 다양한 기능을 제공합니다:
+
+```bash
+# 다른 프로바이더 추가
+llm-orc auth add google-gemini
+llm-orc auth add anthropic-api
+
+# 앙상블 실행
+llm-orc invoke example-ensemble
+
+# MCP 서버로 실행
+llm-orc serve example-ensemble
+```
+
+자세한 내용은 [llm-orc 문서](https://github.com/mrilikecoding/llm-orc)를 참조하세요.
+
+## Claude via LLM-ORC (English)
+
+A method to handle Claude OAuth authentication using llm-orc and use that token in Avante.
+
+### Advantages
+
+- ✅ Uses proven OAuth implementation
+- ✅ llm-orc automatically handles token refresh
+- ✅ Encrypted token storage
+- ✅ Simple setup
+
+### Installation and Setup
+
+#### 1. Install llm-orc
+
+```bash
+# Install directly from GitHub
+git clone https://github.com/mrilikecoding/llm-orc.git ~/.local/share/llm-orc
+cd ~/.local/share/llm-orc
+pip install .
+```
+
+#### 2. Claude OAuth Authentication
+
+```bash
+# Add Claude Pro/Max OAuth authentication
+llm-orc auth add anthropic-claude-pro-max
+```
+
+Follow these steps:
+1. Browser will open automatically
+2. Log in to Claude and approve permissions
+3. Find the `code=` parameter in the redirected page URL
+4. Paste that code into the terminal
+
+#### 3. Verify Authentication
+
+```bash
+# Check list of authenticated providers
+llm-orc auth list
+
+# Test Claude
+llm-orc invoke validate-anthropic-claude-pro-max
+```
+
+#### 4. Avante Configuration
+
+In `~/.config/nvim/lua/plugins/avante.lua`:
+
+```lua
+providers = {
+    claude_llm_orc = {
+        -- Remove __inherited_from and implement directly
+        api_key_name = nil,  -- No API key needed since using OAuth
+        endpoint = 'https://api.anthropic.com',
+        model = 'claude-sonnet-4-20250514',  -- Latest model name
+        extra_request_body = {
+            temperature = 0,
+            max_tokens = 4096,
+        },
+    },
+}
+```
+
+#### 5. Switch Provider
+
+```vim
+:AvanteSwitchProvider claude_llm_orc
+```
+
+### Usage
+
+Since llm-orc handles authentication, you can use it directly in Avante without additional authentication:
+
+```vim
+" Start conversation with Claude
+:AvanteChat
+
+" Ask questions about code
+:AvanteAsk
+```
+
+### Token Management
+
+llm-orc automatically manages tokens:
+
+- Token location: `~/.config/llm-orc/credentials.yaml` (encrypted)
+- Encryption key: `~/.config/llm-orc/.encryption_key`
+
+#### Check Token Expiration
+
+To check if token has expired:
+
+```bash
+llm-orc invoke validate-anthropic-claude-pro-max
+```
+
+If you see this message, the token has expired:
+```
+Agent Results:
+  validator: ERROR - Token expired - refresh needed
+```
+
+#### Token Refresh
+
+If token expires, re-authenticate:
+
+```bash
+llm-orc auth add anthropic-claude-pro-max
+```
+
+#### Logout
+
+```bash
+llm-orc auth remove anthropic-claude-pro-max
+```
+
+### Troubleshooting
+
+#### Python Dependency Errors
+
+```bash
+pip install cryptography pyyaml
+```
+
+#### Token Decryption Failure
+
+1. Reinstall llm-orc
+2. Re-authenticate
+
+#### Provider Not Found
+
+Restart Neovim and try again.
+
+### Additional llm-orc Features
+
+llm-orc provides various features beyond Claude:
+
+```bash
+# Add other providers
+llm-orc auth add google-gemini
+llm-orc auth add anthropic-api
+
+# Run ensemble
+llm-orc invoke example-ensemble
+
+# Run as MCP server
+llm-orc serve example-ensemble
+```
+
+For more details, refer to [llm-orc documentation](https://github.com/mrilikecoding/llm-orc).
+
 ## Ollama
 
 ollama is a first-class provider for avante.nvim. You can use it by setting `provider = "ollama"` in the configuration, and set the `model` field in `ollama` to the model you want to use. For example:
