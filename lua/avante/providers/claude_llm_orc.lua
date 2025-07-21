@@ -87,7 +87,7 @@ Respect and use existing conventions, libraries, etc that are already present in
 
 Make sure code comments are in English when generating them.
 
-항상 ~/.config/nvim/*.avanterules 파일을 참고하세요.
+항상 ~/.config/nvim/agentic.avanterules 파일을 참고하세요.
 항상 한글로 답변하세요.
 
 ====
