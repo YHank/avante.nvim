@@ -35,6 +35,16 @@ local PRIORITY = (vim.hl or vim.highlight).priorities.user
 
 local RESP_SEPARATOR = "-------"
 
+---This is a list of known sidebar containers or sub-windows. They are listed in
+---the order they appear in the sidebar, from top to bottom.
+local SIDEBAR_CONTAINERS = {
+  "result",
+  "selected_code",
+  "selected_files",
+  "todos",
+  "input",
+}
+
 ---@class avante.Sidebar
 local Sidebar = {}
 Sidebar.__index = Sidebar
@@ -49,12 +59,7 @@ Sidebar.__index = Sidebar
 ---@field id integer
 ---@field augroup integer
 ---@field code avante.CodeState
----@field winids table<"result_container" | "todos_container" | "selected_code_container" | "selected_files_container" | "input_container", integer>
----@field result_container NuiSplit | nil
----@field todos_container NuiSplit | nil
----@field selected_code_container NuiSplit | nil
----@field selected_files_container NuiSplit | nil
----@field input_container NuiSplit | nil
+---@field containers { result?: NuiSplit, todos?: NuiSplit, selected_code?: NuiSplit, selected_files?: NuiSplit, input?: NuiSplit }
 ---@field file_selector FileSelector
 ---@field chat_history avante.ChatHistory | nil
 ---@field current_state avante.GenerateState | nil
@@ -81,11 +86,7 @@ function Sidebar:new(id)
       selected_code_container = 0,
       input_container = 0,
     },
-    result_container = nil,
-    todos_container = nil,
-    selected_code_container = nil,
-    selected_files_container = nil,
-    input_container = nil,
+    containers = {},
     file_selector = FileSelector:new(id),
     is_generating = false,
     chat_history = nil,
@@ -111,6 +112,13 @@ function Sidebar:delete_autocmds()
   self.augroup = nil
 end
 
+function Sidebar:delete_containers()
+  for _, container in pairs(self.containers) do
+    container:unmount()
+  end
+  self.containers = {}
+end
+
 function Sidebar:reset()
   -- clean up event handlers
   if self.augroup then
@@ -125,19 +133,9 @@ function Sidebar:reset()
   -- clean up file selector events
   if self.file_selector then self.file_selector:off("update") end
 
-  if self.result_container then self.result_container:unmount() end
-  if self.selected_code_container then self.selected_code_container:unmount() end
-  if self.selected_files_container then self.selected_files_container:unmount() end
-  if self.input_container then self.input_container:unmount() end
+  self:delete_containers()
 
   self.code = { bufnr = 0, winid = 0, selection = nil }
-  self.winids =
-    { result_container = 0, selected_files_container = 0, selected_code_container = 0, input_container = 0 }
-  self.result_container = nil
-  self.todos_container = nil
-  self.selected_code_container = nil
-  self.selected_files_container = nil
-  self.input_container = nil
   self.scroll = true
   self.old_result_lines = {}
   self.token_count = nil
@@ -199,8 +197,9 @@ end
 
 function Sidebar:set_code_winhl()
   if not self.code.winid or not api.nvim_win_is_valid(self.code.winid) then return end
+  if not self.containers.result or not api.nvim_win_is_valid(self.containers.result.winid) then return end
 
-  if Utils.should_hidden_border(self.code.winid, self.winids.result_container) then
+  if Utils.should_hidden_border(self.code.winid, self.containers.result.winid) then
     Utils.debug("setting winhl")
     local old_winhl = vim.wo[self.code.winid].winhl
     if self.code.old_winhl == nil then
@@ -234,10 +233,10 @@ end
 ---@param opts? SidebarCloseOptions
 function Sidebar:close(opts)
   opts = vim.tbl_extend("force", { goto_code_win = true }, opts or {})
+
   self:delete_autocmds()
-  for _, comp in pairs(self) do
-    if comp and type(comp) == "table" and comp.unmount then comp:unmount() end
-  end
+  self:delete_containers()
+
   self.old_result_lines = {}
   if opts.goto_code_win and self.code and self.code.winid and api.nvim_win_is_valid(self.code.winid) then
     fn.win_gotoid(self.code.winid)
@@ -256,20 +255,20 @@ end
 ---@return boolean
 function Sidebar:focus()
   if self:is_open() then
-    fn.win_gotoid(self.result_container.winid)
+    fn.win_gotoid(self.containers.result.winid)
     return true
   end
   return false
 end
 
 function Sidebar:focus_input()
-  if Utils.is_valid_container(self.input_container, true) then
-    api.nvim_set_current_win(self.input_container.winid)
+  if Utils.is_valid_container(self.containers.input, true) then
+    api.nvim_set_current_win(self.containers.input.winid)
     self:show_input_hint()
   end
 end
 
-function Sidebar:is_open() return Utils.is_valid_container(self.result_container, true) end
+function Sidebar:is_open() return Utils.is_valid_container(self.containers.result, true) end
 
 function Sidebar:in_code_win() return self.code.winid == api.nvim_get_current_win() end
 
@@ -731,7 +730,7 @@ end
 function Sidebar:is_cursor_in_user_request_block()
   local block = self:get_current_user_request_block()
   if block == nil then return false end
-  local cursor_line = api.nvim_win_get_cursor(self.result_container.winid)[1]
+  local cursor_line = api.nvim_win_get_cursor(self.containers.result.winid)[1]
   return cursor_line >= block.start_line and cursor_line <= block.end_line
 end
 
@@ -834,11 +833,11 @@ function Sidebar:edit_user_request()
   local block = self:get_current_user_request_block()
   if not block then return end
 
-  if Utils.is_valid_container(self.input_container) then
+  if Utils.is_valid_container(self.containers.input) then
     local lines = vim.split(block.content, "\n")
-    api.nvim_buf_set_lines(self.input_container.bufnr, 0, -1, false, lines)
-    api.nvim_set_current_win(self.input_container.winid)
-    api.nvim_win_set_cursor(self.input_container.winid, { 1, #lines > 0 and #lines[1] or 0 })
+    api.nvim_buf_set_lines(self.containers.input.bufnr, 0, -1, false, lines)
+    api.nvim_set_current_win(self.containers.input.winid)
+    api.nvim_win_set_cursor(self.containers.input.winid, { 1, #lines > 0 and #lines[1] or 0 })
   end
 end
 
@@ -848,8 +847,8 @@ function Sidebar:apply(current_cursor)
   local all_snippets_map = extract_code_snippets_map(response)
   local selected_snippets_map = {}
   if current_cursor then
-    if self.result_container and self.result_container.winid then
-      local cursor_line = Utils.get_cursor_pos(self.result_container.winid)
+    if self.containers.result and self.containers.result.winid then
+      local cursor_line = Utils.get_cursor_pos(self.containers.result.winid)
       for filepath, snippets in pairs(all_snippets_map) do
         for _, snippet in ipairs(snippets) do
           if
@@ -932,18 +931,14 @@ local base_win_options = {
 }
 
 function Sidebar:render_header(winid, bufnr, header_text, hl, reverse_hl)
+  if not Config.windows.sidebar_header.enabled then return end
   if not bufnr or not api.nvim_buf_is_valid(bufnr) then return end
 
-  local is_result_win = self.winids.result_container == winid
-
+  local is_result_win = self.containers.result and self.containers.result.winid == winid
   local separator_char = is_result_win and " " or "-"
-
-  if not Config.windows.sidebar_header.enabled then return end
-
-  if not Config.windows.sidebar_header.rounded then header_text = " " .. header_text .. " " end
-
   local win_width = vim.api.nvim_win_get_width(winid)
 
+  if not Config.windows.sidebar_header.rounded then header_text = " " .. header_text .. " " end
   local padding = math.floor((win_width - #header_text) / 2)
   if Config.windows.sidebar_header.align ~= "center" then padding = win_width - #header_text end
 
@@ -980,11 +975,11 @@ function Sidebar:render_header(winid, bufnr, header_text, hl, reverse_hl)
 end
 
 function Sidebar:render_result()
-  if not Utils.is_valid_container(self.result_container) then return end
+  if not Utils.is_valid_container(self.containers.result) then return end
   local header_text = Utils.icon("󰭻 ") .. "Avante"
   self:render_header(
-    self.result_container.winid,
-    self.result_container.bufnr,
+    self.containers.result.winid,
+    self.containers.result.bufnr,
     header_text,
     Highlights.TITLE,
     Highlights.REVERSED_TITLE
@@ -994,7 +989,7 @@ end
 ---@param ask? boolean
 function Sidebar:render_input(ask)
   if ask == nil then ask = true end
-  if not Utils.is_valid_container(self.input_container) then return end
+  if not Utils.is_valid_container(self.containers.input) then return end
 
   local header_text = string.format(
     "%s%s (" .. Config.mappings.sidebar.switch_windows .. ": switch focus)",
@@ -1013,8 +1008,8 @@ function Sidebar:render_input(ask)
   end
 
   self:render_header(
-    self.input_container.winid,
-    self.input_container.bufnr,
+    self.containers.input.winid,
+    self.containers.input.bufnr,
     header_text,
     Highlights.THIRD_TITLE,
     Highlights.REVERSED_THIRD_TITLE
@@ -1022,7 +1017,7 @@ function Sidebar:render_input(ask)
 end
 
 function Sidebar:render_selected_code()
-  if not Utils.is_valid_container(self.selected_code_container) then return end
+  if not Utils.is_valid_container(self.containers.selected_code) then return end
 
   local selected_code_lines_count = 0
   local selected_code_max_lines_count = 5
@@ -1041,8 +1036,8 @@ function Sidebar:render_selected_code()
     )
 
   self:render_header(
-    self.selected_code_container.winid,
-    self.selected_code_container.bufnr,
+    self.containers.selected_code.winid,
+    self.containers.selected_code.bufnr,
     header_text,
     Highlights.SUBTITLE,
     Highlights.REVERSED_SUBTITLE
@@ -1050,60 +1045,60 @@ function Sidebar:render_selected_code()
 end
 
 function Sidebar:bind_apply_key()
-  if self.result_container then
+  if self.containers.result then
     vim.keymap.set(
       "n",
       Config.mappings.sidebar.apply_cursor,
       function() self:apply(true) end,
-      { buffer = self.result_container.bufnr, noremap = true, silent = true }
+      { buffer = self.containers.result.bufnr, noremap = true, silent = true }
     )
   end
 end
 
 function Sidebar:unbind_apply_key()
-  if self.result_container then
-    pcall(vim.keymap.del, "n", Config.mappings.sidebar.apply_cursor, { buffer = self.result_container.bufnr })
+  if self.containers.result then
+    pcall(vim.keymap.del, "n", Config.mappings.sidebar.apply_cursor, { buffer = self.containers.result.bufnr })
   end
 end
 
 function Sidebar:bind_retry_user_request_key()
-  if self.result_container then
+  if self.containers.result then
     vim.keymap.set(
       "n",
       Config.mappings.sidebar.retry_user_request,
       function() self:retry_user_request() end,
-      { buffer = self.result_container.bufnr, noremap = true, silent = true }
+      { buffer = self.containers.result.bufnr, noremap = true, silent = true }
     )
   end
 end
 
 function Sidebar:unbind_retry_user_request_key()
-  if self.result_container then
-    pcall(vim.keymap.del, "n", Config.mappings.sidebar.retry_user_request, { buffer = self.result_container.bufnr })
+  if self.containers.result then
+    pcall(vim.keymap.del, "n", Config.mappings.sidebar.retry_user_request, { buffer = self.containers.result.bufnr })
   end
 end
 
 function Sidebar:bind_edit_user_request_key()
-  if self.result_container then
+  if self.containers.result then
     vim.keymap.set(
       "n",
       Config.mappings.sidebar.edit_user_request,
       function() self:edit_user_request() end,
-      { buffer = self.result_container.bufnr, noremap = true, silent = true }
+      { buffer = self.containers.result.bufnr, noremap = true, silent = true }
     )
   end
 end
 
 function Sidebar:unbind_edit_user_request_key()
-  if self.result_container then
-    pcall(vim.keymap.del, "n", Config.mappings.sidebar.edit_user_request, { buffer = self.result_container.bufnr })
+  if self.containers.result then
+    pcall(vim.keymap.del, "n", Config.mappings.sidebar.edit_user_request, { buffer = self.containers.result.bufnr })
   end
 end
 
 function Sidebar:bind_sidebar_keys(codeblocks)
   ---@param direction "next" | "prev"
   local function jump_to_codeblock(direction)
-    local cursor_line = api.nvim_win_get_cursor(self.result_container.winid)[1]
+    local cursor_line = api.nvim_win_get_cursor(self.containers.result.winid)[1]
     ---@type AvanteCodeblock
     local target_block
 
@@ -1126,7 +1121,7 @@ function Sidebar:bind_sidebar_keys(codeblocks)
     end
 
     if target_block then
-      api.nvim_win_set_cursor(self.result_container.winid, { target_block.start_line, 0 })
+      api.nvim_win_set_cursor(self.containers.result.winid, { target_block.start_line, 0 })
       vim.cmd("normal! zz")
     else
       Utils.error("No codeblock found")
@@ -1136,7 +1131,7 @@ function Sidebar:bind_sidebar_keys(codeblocks)
   ---@param direction "next" | "prev"
   local function jump_to_prompt(direction)
     local current_request_block = self:get_current_user_request_block()
-    local current_line = Utils.get_cursor_pos(self.result_container.winid)
+    local current_line = Utils.get_cursor_pos(self.containers.result.winid)
     if not current_request_block then
       Utils.error("No prompt found")
       return
@@ -1145,11 +1140,11 @@ function Sidebar:bind_sidebar_keys(codeblocks)
       (current_request_block.start_line > current_line and direction == "next")
       or (current_request_block.end_line < current_line and direction == "prev")
     then
-      api.nvim_win_set_cursor(self.result_container.winid, { current_request_block.start_line, 0 })
+      api.nvim_win_set_cursor(self.containers.result.winid, { current_request_block.start_line, 0 })
       return
     end
     local start_search_line = current_line
-    local result_lines = Utils.get_buf_lines(0, -1, self.result_container.bufnr)
+    local result_lines = Utils.get_buf_lines(0, -1, self.containers.result.bufnr)
     local end_search_line = direction == "next" and #result_lines or 1
     local step = direction == "next" and 1 or -1
     local query_pos ---@type integer|nil
@@ -1169,52 +1164,52 @@ function Sidebar:bind_sidebar_keys(codeblocks)
       Utils.error("No prompt found")
       return
     end
-    api.nvim_win_set_cursor(self.result_container.winid, { current_request_block.start_line, 0 })
+    api.nvim_win_set_cursor(self.containers.result.winid, { current_request_block.start_line, 0 })
   end
 
   vim.keymap.set(
     "n",
     Config.mappings.sidebar.apply_all,
     function() self:apply(false) end,
-    { buffer = self.result_container.bufnr, noremap = true, silent = true }
+    { buffer = self.containers.result.bufnr, noremap = true, silent = true }
   )
   vim.keymap.set(
     "n",
     Config.mappings.jump.next,
     function() jump_to_codeblock("next") end,
-    { buffer = self.result_container.bufnr, noremap = true, silent = true }
+    { buffer = self.containers.result.bufnr, noremap = true, silent = true }
   )
   vim.keymap.set(
     "n",
     Config.mappings.jump.prev,
     function() jump_to_codeblock("prev") end,
-    { buffer = self.result_container.bufnr, noremap = true, silent = true }
+    { buffer = self.containers.result.bufnr, noremap = true, silent = true }
   )
   vim.keymap.set(
     "n",
     Config.mappings.sidebar.next_prompt,
     function() jump_to_prompt("next") end,
-    { buffer = self.result_container.bufnr, noremap = true, silent = true }
+    { buffer = self.containers.result.bufnr, noremap = true, silent = true }
   )
   vim.keymap.set(
     "n",
     Config.mappings.sidebar.prev_prompt,
     function() jump_to_prompt("prev") end,
-    { buffer = self.result_container.bufnr, noremap = true, silent = true }
+    { buffer = self.containers.result.bufnr, noremap = true, silent = true }
   )
 end
 
 function Sidebar:unbind_sidebar_keys()
-  if Utils.is_valid_container(self.result_container) then
-    pcall(vim.keymap.del, "n", Config.mappings.sidebar.apply_all, { buffer = self.result_container.bufnr })
-    pcall(vim.keymap.del, "n", Config.mappings.jump.next, { buffer = self.result_container.bufnr })
-    pcall(vim.keymap.del, "n", Config.mappings.jump.prev, { buffer = self.result_container.bufnr })
+  if Utils.is_valid_container(self.containers.result) then
+    pcall(vim.keymap.del, "n", Config.mappings.sidebar.apply_all, { buffer = self.containers.result.bufnr })
+    pcall(vim.keymap.del, "n", Config.mappings.jump.next, { buffer = self.containers.result.bufnr })
+    pcall(vim.keymap.del, "n", Config.mappings.jump.prev, { buffer = self.containers.result.bufnr })
   end
 end
 
 ---@param opts AskOptions
 function Sidebar:on_mount(opts)
-  self:refresh_winids()
+  self:setup_window_navigation(self.containers.result)
 
   -- Add keymap to add current buffer while sidebar is open
   if Config.mappings.files and Config.mappings.files.add_current then
@@ -1231,18 +1226,22 @@ function Sidebar:on_mount(opts)
     })
   end
 
-  api.nvim_set_option_value("wrap", Config.windows.wrap, { win = self.result_container.winid })
+  api.nvim_set_option_value("wrap", Config.windows.wrap, { win = self.containers.result.winid })
 
   local current_apply_extmark_id = nil
 
   ---@param block AvanteCodeblock
   local function show_apply_button(block)
     if current_apply_extmark_id then
-      api.nvim_buf_del_extmark(self.result_container.bufnr, CODEBLOCK_KEYBINDING_NAMESPACE, current_apply_extmark_id)
+      api.nvim_buf_del_extmark(self.containers.result.bufnr, CODEBLOCK_KEYBINDING_NAMESPACE, current_apply_extmark_id)
     end
 
-    current_apply_extmark_id =
-      api.nvim_buf_set_extmark(self.result_container.bufnr, CODEBLOCK_KEYBINDING_NAMESPACE, block.start_line - 1, -1, {
+    current_apply_extmark_id = api.nvim_buf_set_extmark(
+      self.containers.result.bufnr,
+      CODEBLOCK_KEYBINDING_NAMESPACE,
+      block.start_line - 1,
+      -1,
+      {
         virt_text = {
           {
             string.format(
@@ -1256,7 +1255,8 @@ function Sidebar:on_mount(opts)
         virt_text_pos = "right_align",
         hl_group = "AvanteInlineHint",
         priority = PRIORITY,
-      })
+      }
+    )
   end
 
   local current_user_request_block_extmark_id = nil
@@ -1264,7 +1264,7 @@ function Sidebar:on_mount(opts)
   local function show_user_request_block_control_buttons()
     if current_user_request_block_extmark_id then
       api.nvim_buf_del_extmark(
-        self.result_container.bufnr,
+        self.containers.result.bufnr,
         USER_REQUEST_BLOCK_KEYBINDING_NAMESPACE,
         current_user_request_block_extmark_id
       )
@@ -1274,7 +1274,7 @@ function Sidebar:on_mount(opts)
     if not block then return end
 
     current_user_request_block_extmark_id = api.nvim_buf_set_extmark(
-      self.result_container.bufnr,
+      self.containers.result.bufnr,
       USER_REQUEST_BLOCK_KEYBINDING_NAMESPACE,
       block.start_line - 1,
       -1,
@@ -1301,7 +1301,7 @@ function Sidebar:on_mount(opts)
 
   api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
     group = self.augroup,
-    buffer = self.result_container.bufnr,
+    buffer = self.containers.result.bufnr,
     callback = function(ev)
       local in_codeblock = is_cursor_in_codeblock(codeblocks)
 
@@ -1329,7 +1329,7 @@ function Sidebar:on_mount(opts)
   if self.code.bufnr and api.nvim_buf_is_valid(self.code.bufnr) then
     api.nvim_create_autocmd({ "BufEnter", "BufWritePost" }, {
       group = self.augroup,
-      buffer = self.result_container.bufnr,
+      buffer = self.containers.result.bufnr,
       callback = function(ev)
         codeblocks = parse_codeblocks(ev.buf)
         self:bind_sidebar_keys(codeblocks)
@@ -1340,8 +1340,8 @@ function Sidebar:on_mount(opts)
       group = self.augroup,
       pattern = VIEW_BUFFER_UPDATED_PATTERN,
       callback = function()
-        if not Utils.is_valid_container(self.result_container) then return end
-        codeblocks = parse_codeblocks(self.result_container.bufnr)
+        if not Utils.is_valid_container(self.containers.result) then return end
+        codeblocks = parse_codeblocks(self.containers.result.bufnr)
         self:bind_sidebar_keys(codeblocks)
       end,
     })
@@ -1349,7 +1349,7 @@ function Sidebar:on_mount(opts)
 
   api.nvim_create_autocmd("BufLeave", {
     group = self.augroup,
-    buffer = self.result_container.bufnr,
+    buffer = self.containers.result.bufnr,
     callback = function() self:unbind_sidebar_keys() end,
   })
 
@@ -1357,8 +1357,8 @@ function Sidebar:on_mount(opts)
   self:render_input(opts.ask)
   self:render_selected_code()
 
-  if self.selected_code_container ~= nil then
-    local selected_code_buf = self.selected_code_container.bufnr
+  if self.containers.selected_code ~= nil then
+    local selected_code_buf = self.containers.selected_code.bufnr
     if selected_code_buf ~= nil then
       if self.code.selection ~= nil then
         Utils.unlock_buf(selected_code_buf)
@@ -1375,12 +1375,12 @@ function Sidebar:on_mount(opts)
 
   api.nvim_create_autocmd("BufEnter", {
     group = self.augroup,
-    buffer = self.result_container.bufnr,
+    buffer = self.containers.result.bufnr,
     callback = function()
       if Config.behaviour.auto_focus_sidebar then
         self:focus()
-        if Utils.is_valid_container(self.input_container, true) then
-          api.nvim_set_current_win(self.input_container.winid)
+        if Utils.is_valid_container(self.containers.input, true) then
+          api.nvim_set_current_win(self.containers.input.winid)
           vim.defer_fn(function()
             if Config.windows.ask.start_insert then vim.cmd("noautocmd startinsert!") end
           end, 300)
@@ -1394,82 +1394,97 @@ function Sidebar:on_mount(opts)
     group = self.augroup,
     callback = function(args)
       local closed_winid = tonumber(args.match)
-      if closed_winid == self.winids.selected_files_container then return end
-      if closed_winid == self.winids.todos_container then return end
-      if not self:is_sidebar_winid(closed_winid) then return end
-      self:close()
+      if closed_winid then
+        local container = self:get_sidebar_window(closed_winid)
+        -- Ignore closing selected files and todos windows because they can disappear during normal operation
+        if container and container ~= self.containers.selected_files and container ~= self.containers.todos then
+          self:close()
+        end
+      end
     end,
   })
 
-  for _, comp in pairs(self) do
-    if comp and type(comp) == "table" and comp.mount and comp.bufnr and api.nvim_buf_is_valid(comp.bufnr) then
-      Utils.mark_as_sidebar_buffer(comp.bufnr)
+  for _, container in pairs(self.containers) do
+    if container.mount and container.bufnr and api.nvim_buf_is_valid(container.bufnr) then
+      Utils.mark_as_sidebar_buffer(container.bufnr)
     end
   end
 end
 
-function Sidebar:refresh_winids()
-  self.winids = {}
-  for key, comp in pairs(self) do
-    if comp and type(comp) == "table" and comp.winid and api.nvim_win_is_valid(comp.winid) then
-      self.winids[key] = comp.winid
+--- Given a desired container name, returns the window ID of the first valid container
+--- situated above it in the sidebar's order.
+--- @param container_name string The name of the container to start searching from.
+--- @return integer|nil The window ID of the previous valid container, or nil.
+function Sidebar:get_split_candidate(container_name)
+  local start_index = 0
+  for i, name in ipairs(SIDEBAR_CONTAINERS) do
+    if name == container_name then
+      start_index = i
+      break
     end
   end
 
-  local winids = {}
-  if self.winids.result_container then table.insert(winids, self.winids.result_container) end
-  if self.winids.selected_files_container then table.insert(winids, self.winids.selected_files_container) end
-  if self.winids.selected_code_container then table.insert(winids, self.winids.selected_code_container) end
-  if self.winids.todos_container then table.insert(winids, self.winids.todos_container) end
-  if self.winids.input_container then table.insert(winids, self.winids.input_container) end
+  if start_index > 1 then
+    for i = start_index - 1, 1, -1 do
+      local container = self.containers[SIDEBAR_CONTAINERS[i]]
+      if Utils.is_valid_container(container, true) then return container.winid end
+    end
+  end
+  return nil
+end
 
-  local function switch_windows()
-    local current_winid = api.nvim_get_current_win()
-    winids = vim.iter(winids):filter(function(winid) return api.nvim_win_is_valid(winid) end):totable()
-    local current_idx = Utils.tbl_indexof(winids, current_winid) or 1
-    if current_idx == #winids then
-      current_idx = 1
+---Cycles focus over sidebar components.
+---@param direction "next" | "previous"
+function Sidebar:switch_window_focus(direction)
+  local current_winid = vim.api.nvim_get_current_win()
+  local current_index = nil
+  local ordered_winids = {}
+
+  for _, name in ipairs(SIDEBAR_CONTAINERS) do
+    local container = self.containers[name]
+    if container and container.winid then
+      table.insert(ordered_winids, container.winid)
+      if container.winid == current_winid then current_index = #ordered_winids end
+    end
+  end
+
+  if current_index and #ordered_winids > 1 then
+    local next_index
+    if direction == "next" then
+      next_index = (current_index % #ordered_winids) + 1
+    elseif direction == "previous" then
+      next_index = current_index - 1
+      if next_index < 1 then next_index = #ordered_winids end
     else
-      current_idx = current_idx + 1
+      error("Invalid 'direction' parameter: " .. direction)
     end
-    local winid = winids[current_idx]
-    if winid and api.nvim_win_is_valid(winid) then pcall(api.nvim_set_current_win, winid) end
-  end
 
-  local function reverse_switch_windows()
-    local current_winid = api.nvim_get_current_win()
-    winids = vim.iter(winids):filter(function(winid) return api.nvim_win_is_valid(winid) end):totable()
-    local current_idx = Utils.tbl_indexof(winids, current_winid) or 1
-    if current_idx == 1 then
-      current_idx = #winids
-    else
-      current_idx = current_idx - 1
-    end
-    local winid = winids[current_idx]
-    if winid and api.nvim_win_is_valid(winid) then api.nvim_set_current_win(winid) end
+    vim.api.nvim_set_current_win(ordered_winids[next_index])
   end
+end
 
-  for _, winid in ipairs(winids) do
-    local buf = api.nvim_win_get_buf(winid)
-    Utils.safe_keymap_set(
-      { "n", "i" },
-      Config.mappings.sidebar.switch_windows,
-      function() switch_windows() end,
-      { buffer = buf, noremap = true, silent = true, nowait = true }
-    )
-    Utils.safe_keymap_set(
-      { "n", "i" },
-      Config.mappings.sidebar.reverse_switch_windows,
-      function() reverse_switch_windows() end,
-      { buffer = buf, noremap = true, silent = true, nowait = true }
-    )
-  end
+---Sets up focus switching shortcuts for a sidebar component
+---@param container NuiSplit
+function Sidebar:setup_window_navigation(container)
+  local buf = api.nvim_win_get_buf(container.winid)
+  Utils.safe_keymap_set(
+    { "n", "i" },
+    Config.mappings.sidebar.switch_windows,
+    function() self:switch_window_focus("next") end,
+    { buffer = buf, noremap = true, silent = true, nowait = true }
+  )
+  Utils.safe_keymap_set(
+    { "n", "i" },
+    Config.mappings.sidebar.reverse_switch_windows,
+    function() self:switch_window_focus("previous") end,
+    { buffer = buf, noremap = true, silent = true, nowait = true }
+  )
 end
 
 function Sidebar:resize()
-  for _, comp in pairs(self) do
-    if comp and type(comp) == "table" and comp.winid and api.nvim_win_is_valid(comp.winid) then
-      api.nvim_win_set_width(comp.winid, Config.get_window_width())
+  for _, container in pairs(self.containers) do
+    if container.winid and api.nvim_win_is_valid(container.winid) then
+      api.nvim_win_set_width(container.winid, Config.get_window_width())
     end
   end
   self:render_result()
@@ -1506,40 +1521,33 @@ function Sidebar:initialize()
   return self
 end
 
-function Sidebar:is_focused()
-  if not self:is_open() then return false end
-
-  local current_winid = api.nvim_get_current_win()
-  if self.winids.result_container and self.winids.result_container == current_winid then return true end
-  if self.winids.selected_files_container and self.winids.selected_files_container == current_winid then
-    return true
-  end
-  if self.winids.selected_code_container and self.winids.selected_code_container == current_winid then return true end
-  if self.winids.input_container and self.winids.input_container == current_winid then return true end
-
-  return false
-end
-
 function Sidebar:is_focused_on_result()
-  return self:is_open() and self.result_container and self.result_container.winid == api.nvim_get_current_win()
+  return self:is_open() and self.containers.result and self.containers.result.winid == api.nvim_get_current_win()
 end
 
-function Sidebar:is_sidebar_winid(winid)
-  for _, stored_winid in pairs(self.winids) do
-    if stored_winid == winid then return true end
+---Locates container object by its window ID
+---@param winid integer
+---@return NuiSplit|nil
+function Sidebar:get_sidebar_window(winid)
+  for _, container in pairs(self.containers) do
+    if container and container.winid == winid then return container end
   end
-  return false
 end
+
+---Checks if a window with given ID belongs to the sidebar
+---@param winid integer
+---@return boolean
+function Sidebar:is_sidebar_winid(winid) return self:get_sidebar_window(winid) ~= nil end
 
 ---@return boolean
 function Sidebar:should_auto_scroll()
-  if not self.result_container or not self.result_container.winid then return false end
-  if not api.nvim_win_is_valid(self.result_container.winid) then return false end
+  if not self.containers.result or not self.containers.result.winid then return false end
+  if not api.nvim_win_is_valid(self.containers.result.winid) then return false end
 
-  local win_height = api.nvim_win_get_height(self.result_container.winid)
-  local total_lines = api.nvim_buf_line_count(self.result_container.bufnr)
+  local win_height = api.nvim_win_get_height(self.containers.result.winid)
+  local total_lines = api.nvim_buf_line_count(self.containers.result.bufnr)
 
-  local topline = vim.fn.line("w0", self.result_container.winid)
+  local topline = vim.fn.line("w0", self.containers.result.winid)
 
   local last_visible_line = topline + win_height - 1
 
@@ -1556,10 +1564,10 @@ end, 50)
 ---@param content string concatenated content of the buffer
 ---@param opts? {focus?: boolean, scroll?: boolean, backspace?: integer, callback?: fun(): nil} whether to focus the result view
 function Sidebar:update_content(content, opts)
-  if not self.result_container or not self.result_container.bufnr then return end
+  if not self.containers.result or not self.containers.result.bufnr then return end
 
   -- 提前验证容器有效性，避免后续无效操作
-  if not Utils.is_valid_container(self.result_container) then return end
+  if not Utils.is_valid_container(self.containers.result) then return end
 
   local should_auto_scroll = self:should_auto_scroll()
 
@@ -1588,12 +1596,12 @@ function Sidebar:update_content(content, opts)
 
   -- 使用 vim.schedule 而不是 vim.defer_fn(0)，性能更好
   -- 再次检查容器有效性
-  if not Utils.is_valid_container(self.result_container) then return end
+  if not Utils.is_valid_container(self.containers.result) then return end
 
   self:clear_state()
 
   -- 批量更新操作
-  local bufnr = self.result_container.bufnr
+  local bufnr = self.containers.result.bufnr
   Utils.unlock_buf(bufnr)
 
   Utils.update_buffer_lines(RESULT_BUF_HL_NAMESPACE, bufnr, self.old_result_lines, history_lines)
@@ -1607,7 +1615,7 @@ function Sidebar:update_content(content, opts)
 
   -- 处理焦点和滚动
   if opts.focus and not self:is_focused_on_result() then
-    xpcall(function() api.nvim_set_current_win(self.result_container.winid) end, function(err)
+    xpcall(function() api.nvim_set_current_win(self.containers.result.winid) end, function(err)
       Utils.debug("Failed to set current win:", err)
       return err
     end)
@@ -1854,7 +1862,7 @@ end
 function Sidebar:get_content_between_separators(position)
   local separator = RESP_SEPARATOR
   local cursor_line = position or Utils.get_cursor_pos()
-  local lines = Utils.get_buf_lines(0, -1, self.result_container.bufnr)
+  local lines = Utils.get_buf_lines(0, -1, self.containers.result.bufnr)
   local start_line, end_line
 
   for i = cursor_line, 1, -1 do
@@ -1909,7 +1917,7 @@ end
 
 function Sidebar:clear_state()
   if self.state_extmark_id then
-    pcall(api.nvim_buf_del_extmark, self.result_container.bufnr, STATE_NAMESPACE, self.state_extmark_id)
+    pcall(api.nvim_buf_del_extmark, self.containers.result.bufnr, STATE_NAMESPACE, self.state_extmark_id)
   end
   self.state_extmark_id = nil
   self.state_spinner_idx = 1
@@ -1917,11 +1925,11 @@ function Sidebar:clear_state()
 end
 
 function Sidebar:render_state()
-  if not Utils.is_valid_container(self.result_container) then return end
+  if not Utils.is_valid_container(self.containers.result) then return end
   if not self.current_state then return end
-  local lines = vim.api.nvim_buf_get_lines(self.result_container.bufnr, 0, -1, false)
+  local lines = vim.api.nvim_buf_get_lines(self.containers.result.bufnr, 0, -1, false)
   if self.state_extmark_id then
-    api.nvim_buf_del_extmark(self.result_container.bufnr, STATE_NAMESPACE, self.state_extmark_id)
+    api.nvim_buf_del_extmark(self.containers.result.bufnr, STATE_NAMESPACE, self.state_extmark_id)
   end
   local spinner_chars = self.state_spinner_chars
   if self.current_state == "thinking" then spinner_chars = self.thinking_spinner_chars end
@@ -1949,14 +1957,14 @@ function Sidebar:render_state()
     virt_line = " " .. spinner_char .. " " .. self.current_state .. " "
   end
 
-  local win_width = api.nvim_win_get_width(self.result_container.winid)
+  local win_width = api.nvim_win_get_width(self.containers.result.winid)
   local padding = math.floor((win_width - vim.fn.strdisplaywidth(virt_line)) / 2)
   local centered_virt_lines = {
     { { string.rep(" ", padding) }, { virt_line, hl } },
   }
 
   local line_num = math.max(0, #lines - 2)
-  self.state_extmark_id = api.nvim_buf_set_extmark(self.result_container.bufnr, STATE_NAMESPACE, line_num, 0, {
+  self.state_extmark_id = api.nvim_buf_set_extmark(self.containers.result.bufnr, STATE_NAMESPACE, line_num, 0, {
     virt_lines = centered_virt_lines,
     hl_eol = true,
     hl_mode = "combine",
@@ -1973,7 +1981,7 @@ You are a responsible senior development engineer, and you are about to leave yo
   self:new_chat(args, cb)
   self.code.selection = nil
   self.file_selector:reset()
-  if self.selected_files_container then self.selected_files_container:unmount() end
+  if self.containers.selected_files then self.containers.selected_files:unmount() end
   vim.api.nvim_exec_autocmds("User", { pattern = "AvanteInputSubmitted", data = { request = user_input } })
 end
 
@@ -2123,29 +2131,30 @@ function Sidebar:add_chat_history(messages, options)
 end
 
 function Sidebar:create_selected_code_container()
-  if self.selected_code_container ~= nil then
-    self.selected_code_container:unmount()
-    self.selected_code_container = nil
+  if self.containers.selected_code ~= nil then
+    self.containers.selected_code:unmount()
+    self.containers.selected_code = nil
   end
 
   local height = self:get_selected_code_container_height()
 
   if self.code.selection ~= nil then
-    self.selected_code_container = Split({
+    self.containers.selected_code = Split({
       enter = false,
       relative = {
         type = "win",
-        winid = self.input_container.winid,
+        winid = self:get_split_candidate("selected_code"),
       },
       buf_options = buf_options,
       win_options = vim.tbl_deep_extend("force", base_win_options, {}),
       size = {
         height = height,
       },
-      position = "top",
+      position = "bottom",
     })
-    self.selected_code_container:mount()
+    self.containers.selected_code:mount()
     self:adjust_layout()
+    self:setup_window_navigation(self.containers.selected_code)
   end
 end
 
@@ -2160,8 +2169,8 @@ function Sidebar:close_input_hint()
 end
 
 function Sidebar:get_input_float_window_row()
-  local win_height = api.nvim_win_get_height(self.input_container.winid)
-  local winline = Utils.winline(self.input_container.winid)
+  local win_height = api.nvim_win_get_height(self.containers.input.winid)
+  local winline = Utils.winline(self.containers.input.winid)
   if winline >= win_height - 1 then return 0 end
   return winline
 end
@@ -2172,7 +2181,7 @@ function Sidebar:show_input_hint()
 
   local hint_text = (fn.mode() ~= "i" and Config.mappings.submit.normal or Config.mappings.submit.insert) .. ": submit"
   if Config.behaviour.enable_token_counting then
-    local input_value = table.concat(api.nvim_buf_get_lines(self.input_container.bufnr, 0, -1, false), "\n")
+    local input_value = table.concat(api.nvim_buf_get_lines(self.containers.input.bufnr, 0, -1, false), "\n")
     if self.token_count == nil then self:initialize_token_count() end
     local tokens = self.token_count + Utils.tokens.calculate_tokens(input_value)
     hint_text = "Tokens: " .. tostring(tokens) .. "; " .. hint_text
@@ -2183,13 +2192,13 @@ function Sidebar:show_input_hint()
   api.nvim_buf_set_extmark(buf, INPUT_HINT_NAMESPACE, 0, 0, { hl_group = "AvantePopupHint", end_col = #hint_text })
 
   -- Get the current window size
-  local win_width = api.nvim_win_get_width(self.input_container.winid)
+  local win_width = api.nvim_win_get_width(self.containers.input.winid)
   local width = #hint_text
 
   -- Create the floating window
   self.input_hint_window = api.nvim_open_win(buf, false, {
     relative = "win",
-    win = self.input_container.winid,
+    win = self.containers.input.winid,
     width = width,
     height = 1,
     row = self:get_input_float_window_row(),
@@ -2202,15 +2211,15 @@ function Sidebar:show_input_hint()
 end
 
 function Sidebar:close_selected_files_hint()
-  if self.selected_files_container and api.nvim_win_is_valid(self.selected_files_container.winid) then
-    pcall(api.nvim_buf_clear_namespace, self.selected_files_container.bufnr, SELECTED_FILES_HINT_NAMESPACE, 0, -1)
+  if self.containers.selected_files and api.nvim_win_is_valid(self.containers.selected_files.winid) then
+    pcall(api.nvim_buf_clear_namespace, self.containers.selected_files.bufnr, SELECTED_FILES_HINT_NAMESPACE, 0, -1)
   end
 end
 
 function Sidebar:show_selected_files_hint()
   self:close_selected_files_hint()
 
-  local cursor_pos = api.nvim_win_get_cursor(self.selected_files_container.winid)
+  local cursor_pos = api.nvim_win_get_cursor(self.containers.selected_files.winid)
   local line_number = cursor_pos[1]
   local col_number = cursor_pos[2]
 
@@ -2224,7 +2233,7 @@ function Sidebar:show_selected_files_hint()
   end
 
   api.nvim_buf_set_extmark(
-    self.selected_files_container.bufnr,
+    self.containers.selected_files.bufnr,
     SELECTED_FILES_HINT_NAMESPACE,
     line_number - 1,
     col_number,
@@ -2398,7 +2407,7 @@ function Sidebar:initialize_token_count()
 end
 
 function Sidebar:create_input_container()
-  if self.input_container then self.input_container:unmount() end
+  if self.containers.input then self.containers.input:unmount() end
 
   if not self.code.bufnr or not api.nvim_buf_is_valid(self.code.bufnr) then return end
 
@@ -2482,9 +2491,9 @@ function Sidebar:create_input_container()
       vim.cmd("normal! G")
     end
 
-    vim.keymap.set("n", "j", on_j, { buffer = self.result_container.bufnr })
-    vim.keymap.set("n", "k", on_k, { buffer = self.result_container.bufnr })
-    vim.keymap.set("n", "G", on_G, { buffer = self.result_container.bufnr })
+    vim.keymap.set("n", "j", on_j, { buffer = self.containers.result.bufnr })
+    vim.keymap.set("n", "k", on_k, { buffer = self.containers.result.bufnr })
+    vim.keymap.set("n", "G", on_G, { buffer = self.containers.result.bufnr })
 
     ---@type AvanteLLMStartCallback
     local function on_start(_) end
@@ -2552,9 +2561,9 @@ function Sidebar:create_input_container()
 
       pcall(function()
         ---remove keymaps
-        vim.keymap.del("n", "j", { buffer = self.result_container.bufnr })
-        vim.keymap.del("n", "k", { buffer = self.result_container.bufnr })
-        vim.keymap.del("n", "G", { buffer = self.result_container.bufnr })
+        vim.keymap.del("n", "j", { buffer = self.containers.result.bufnr })
+        vim.keymap.del("n", "k", { buffer = self.containers.result.bufnr })
+        vim.keymap.del("n", "G", { buffer = self.containers.result.bufnr })
       end)
 
       if stop_opts.error ~= nil then
@@ -2579,8 +2588,10 @@ function Sidebar:create_input_container()
       })
 
       vim.defer_fn(function()
-        if Utils.is_valid_container(self.result_container, true) and Config.behaviour.jump_result_buffer_on_finish then
-          api.nvim_set_current_win(self.result_container.winid)
+        if
+          Utils.is_valid_container(self.containers.result, true) and Config.behaviour.jump_result_buffer_on_finish
+        then
+          api.nvim_set_current_win(self.containers.result.winid)
         end
         if Config.behaviour.auto_apply_diff_after_generation then self:apply(false) end
       end, 0)
@@ -2667,15 +2678,15 @@ function Sidebar:create_input_container()
 
     return {
       width = "40%",
-      height = math.max(1, api.nvim_win_get_height(self.result_container.winid) - selected_code_container_height),
+      height = math.max(1, api.nvim_win_get_height(self.containers.result.winid) - selected_code_container_height),
     }
   end
 
-  self.input_container = Split({
+  self.containers.input = Split({
     enter = false,
     relative = {
       type = "win",
-      winid = self.result_container.winid,
+      winid = self.containers.result.winid,
     },
     buf_options = {
       swapfile = false,
@@ -2691,18 +2702,18 @@ function Sidebar:create_input_container()
       Utils.warn("Sending message to fast!, API key is not yet set", { title = "Avante" })
       return
     end
-    if not Utils.is_valid_container(self.input_container) then return end
-    local lines = api.nvim_buf_get_lines(self.input_container.bufnr, 0, -1, false)
+    if not Utils.is_valid_container(self.containers.input) then return end
+    local lines = api.nvim_buf_get_lines(self.containers.input.bufnr, 0, -1, false)
     local request = table.concat(lines, "\n")
     if request == "" then return end
-    api.nvim_buf_set_lines(self.input_container.bufnr, 0, -1, false, {})
-    api.nvim_win_set_cursor(self.input_container.winid, { 1, 0 })
+    api.nvim_buf_set_lines(self.containers.input.bufnr, 0, -1, false, {})
+    api.nvim_win_set_cursor(self.containers.input.winid, { 1, 0 })
     handle_submit(request)
   end
 
   self.handle_submit = handle_submit
 
-  self.input_container:mount()
+  self.containers.input:mount()
 
   local function place_sign_at_first_line(bufnr)
     local group = "avante_input_prompt_group"
@@ -2712,67 +2723,70 @@ function Sidebar:create_input_container()
     fn.sign_place(0, group, "AvanteInputPromptSign", bufnr, { lnum = 1 })
   end
 
-  place_sign_at_first_line(self.input_container.bufnr)
+  place_sign_at_first_line(self.containers.input.bufnr)
 
   if Utils.in_visual_mode() then
-    -- Exit visual mode
-    vim.cmd("noautocmd stopinsert")
+    -- Exit visual mode. Unfortunately there is no appropriate command
+    -- so we have to simulate keystrokes.
+    local esc_key = api.nvim_replace_termcodes("<Esc>", true, false, true)
+    vim.api.nvim_feedkeys(esc_key, "n", false)
   end
 
-  self.input_container:map("n", Config.mappings.submit.normal, on_submit)
-  self.input_container:map("i", Config.mappings.submit.insert, on_submit)
-  self.input_container:map("n", Config.prompt_logger.next_prompt.normal, PromptLogger.on_log_retrieve(-1))
-  self.input_container:map("i", Config.prompt_logger.next_prompt.insert, PromptLogger.on_log_retrieve(-1))
-  self.input_container:map("n", Config.prompt_logger.prev_prompt.normal, PromptLogger.on_log_retrieve(1))
-  self.input_container:map("i", Config.prompt_logger.prev_prompt.insert, PromptLogger.on_log_retrieve(1))
+  self:setup_window_navigation(self.containers.input)
+  self.containers.input:map("n", Config.mappings.submit.normal, on_submit)
+  self.containers.input:map("i", Config.mappings.submit.insert, on_submit)
+  self.containers.input:map("n", Config.prompt_logger.next_prompt.normal, PromptLogger.on_log_retrieve(-1))
+  self.containers.input:map("i", Config.prompt_logger.next_prompt.insert, PromptLogger.on_log_retrieve(-1))
+  self.containers.input:map("n", Config.prompt_logger.prev_prompt.normal, PromptLogger.on_log_retrieve(1))
+  self.containers.input:map("i", Config.prompt_logger.prev_prompt.insert, PromptLogger.on_log_retrieve(1))
 
   if Config.mappings.sidebar.close_from_input ~= nil then
     if Config.mappings.sidebar.close_from_input.normal ~= nil then
-      self.input_container:map("n", Config.mappings.sidebar.close_from_input.normal, function() self:shutdown() end)
+      self.containers.input:map("n", Config.mappings.sidebar.close_from_input.normal, function() self:shutdown() end)
     end
     if Config.mappings.sidebar.close_from_input.insert ~= nil then
-      self.input_container:map("i", Config.mappings.sidebar.close_from_input.insert, function() self:shutdown() end)
+      self.containers.input:map("i", Config.mappings.sidebar.close_from_input.insert, function() self:shutdown() end)
     end
   end
 
-  api.nvim_set_option_value("filetype", "AvanteInput", { buf = self.input_container.bufnr })
+  api.nvim_set_option_value("filetype", "AvanteInput", { buf = self.containers.input.bufnr })
 
   -- Setup completion
   api.nvim_create_autocmd("InsertEnter", {
     group = self.augroup,
-    buffer = self.input_container.bufnr,
+    buffer = self.containers.input.bufnr,
     once = true,
     desc = "Setup the completion of helpers in the input buffer",
     callback = function() end,
   })
 
   local debounced_show_input_hint = Utils.debounce(function()
-    if vim.api.nvim_win_is_valid(self.input_container.winid) then self:show_input_hint() end
+    if vim.api.nvim_win_is_valid(self.containers.input.winid) then self:show_input_hint() end
   end, 200)
   api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "VimResized" }, {
     group = self.augroup,
-    buffer = self.input_container.bufnr,
+    buffer = self.containers.input.bufnr,
     callback = function()
       debounced_show_input_hint()
-      place_sign_at_first_line(self.input_container.bufnr)
+      place_sign_at_first_line(self.containers.input.bufnr)
     end,
   })
 
   api.nvim_create_autocmd("QuitPre", {
     group = self.augroup,
-    buffer = self.input_container.bufnr,
+    buffer = self.containers.input.bufnr,
     callback = function() self:close_input_hint() end,
   })
 
   api.nvim_create_autocmd("WinClosed", {
     group = self.augroup,
-    pattern = tostring(self.input_container.winid),
+    pattern = tostring(self.containers.input.winid),
     callback = function() self:close_input_hint() end,
   })
 
   api.nvim_create_autocmd("BufEnter", {
     group = self.augroup,
-    buffer = self.input_container.bufnr,
+    buffer = self.containers.input.bufnr,
     callback = function()
       if Config.windows.ask.start_insert then vim.cmd("noautocmd startinsert!") end
     end,
@@ -2780,7 +2794,7 @@ function Sidebar:create_input_container()
 
   api.nvim_create_autocmd("BufLeave", {
     group = self.augroup,
-    buffer = self.input_container.bufnr,
+    buffer = self.containers.input.bufnr,
     callback = function()
       vim.cmd("noautocmd stopinsert")
       self:close_input_hint()
@@ -2790,7 +2804,7 @@ function Sidebar:create_input_container()
   -- Update hint on mode change as submit key sequence may be different
   api.nvim_create_autocmd("ModeChanged", {
     group = self.augroup,
-    buffer = self.input_container.bufnr,
+    buffer = self.containers.input.bufnr,
     callback = function() self:show_input_hint() end,
   })
 
@@ -2798,7 +2812,7 @@ function Sidebar:create_input_container()
     group = self.augroup,
     callback = function()
       local cur_win = api.nvim_get_current_win()
-      if self.input_container and cur_win == self.input_container.winid then
+      if self.containers.input and cur_win == self.containers.input.winid then
         self:show_input_hint()
       else
         self:close_input_hint()
@@ -2813,21 +2827,19 @@ function Sidebar:create_input_container()
       if ev.data and ev.data.request then handle_submit(ev.data.request) end
     end,
   })
-
-  self:refresh_winids()
 end
 
 ---@param value string
 function Sidebar:set_input_value(value)
-  if not self.input_container then return end
+  if not self.containers.input then return end
   if not value then return end
-  api.nvim_buf_set_lines(self.input_container.bufnr, 0, -1, false, vim.split(value, "\n"))
+  api.nvim_buf_set_lines(self.containers.input.bufnr, 0, -1, false, vim.split(value, "\n"))
 end
 
 ---@return string
 function Sidebar:get_input_value()
-  if not self.input_container then return "" end
-  local lines = api.nvim_buf_get_lines(self.input_container.bufnr, 0, -1, false)
+  if not self.containers.input then return "" end
+  local lines = api.nvim_buf_get_lines(self.containers.input.bufnr, 0, -1, false)
   return table.concat(lines, "\n")
 end
 
@@ -2878,8 +2890,8 @@ function Sidebar:adjust_result_container_layout()
   local width = self:get_result_container_width()
   local height = self:get_result_container_height()
 
-  api.nvim_win_set_width(self.result_container.winid, width)
-  api.nvim_win_set_height(self.result_container.winid, height)
+  api.nvim_win_set_width(self.containers.result.winid, width)
+  api.nvim_win_set_height(self.containers.result.winid, height)
 end
 
 ---@param opts AskOptions
@@ -2890,7 +2902,7 @@ function Sidebar:render(opts)
     return (opts and opts.win and opts.win.position) and opts.win.position or calculate_config_window_position()
   end
 
-  self.result_container = Split({
+  self.containers.result = Split({
     enter = false,
     relative = "editor",
     position = get_position(),
@@ -2911,15 +2923,16 @@ function Sidebar:render(opts)
     },
   })
 
-  self.result_container:mount()
+  self.containers.result:mount()
 
-  self.augroup = api.nvim_create_augroup("avante_sidebar_" .. self.id .. self.result_container.winid, { clear = true })
+  self.augroup =
+    api.nvim_create_augroup("avante_sidebar_" .. self.id .. self.containers.result.winid, { clear = true })
 
-  self.result_container:on(event.BufWinEnter, function()
-    xpcall(function() api.nvim_buf_set_name(self.result_container.bufnr, RESULT_BUF_NAME) end, function(_) end)
+  self.containers.result:on(event.BufWinEnter, function()
+    xpcall(function() api.nvim_buf_set_name(self.containers.result.bufnr, RESULT_BUF_NAME) end, function(_) end)
   end)
 
-  self.result_container:map("n", Config.mappings.sidebar.close, function() self:shutdown() end)
+  self.containers.result:map("n", Config.mappings.sidebar.close, function() self:shutdown() end)
 
   self:create_input_container()
 
@@ -2958,28 +2971,28 @@ function Sidebar:get_selected_files_container_height()
 end
 
 function Sidebar:adjust_selected_files_container_layout()
-  if not Utils.is_valid_container(self.selected_files_container, true) then return end
+  if not Utils.is_valid_container(self.containers.selected_files, true) then return end
 
   local win_height = self:get_selected_files_container_height()
-  api.nvim_win_set_height(self.selected_files_container.winid, win_height)
+  api.nvim_win_set_height(self.containers.selected_files.winid, win_height)
 end
 
 function Sidebar:adjust_selected_code_container_layout()
-  if not Utils.is_valid_container(self.selected_code_container, true) then return end
+  if not Utils.is_valid_container(self.containers.selected_code, true) then return end
 
   local win_height = self:get_selected_code_container_height()
-  api.nvim_win_set_height(self.selected_code_container.winid, win_height)
+  api.nvim_win_set_height(self.containers.selected_code.winid, win_height)
 end
 
 function Sidebar:adjust_todos_container_layout()
-  if not Utils.is_valid_container(self.todos_container, true) then return end
+  if not Utils.is_valid_container(self.containers.todos, true) then return end
 
   local win_height = self:get_todos_container_height()
-  api.nvim_win_set_height(self.todos_container.winid, win_height)
+  api.nvim_win_set_height(self.containers.todos.winid, win_height)
 end
 
 function Sidebar:create_selected_files_container()
-  if self.selected_files_container then self.selected_files_container:unmount() end
+  if self.containers.selected_files then self.containers.selected_files:unmount() end
 
   local selected_filepaths = self.file_selector:get_selected_filepaths()
   if #selected_filepaths == 0 then
@@ -2988,11 +3001,11 @@ function Sidebar:create_selected_files_container()
     return
   end
 
-  self.selected_files_container = Split({
+  self.containers.selected_files = Split({
     enter = false,
     relative = {
       type = "win",
-      winid = self.input_container.winid,
+      winid = self:get_split_candidate("selected_files"),
     },
     buf_options = vim.tbl_deep_extend("force", buf_options, {
       modifiable = false,
@@ -3004,29 +3017,23 @@ function Sidebar:create_selected_files_container()
     win_options = vim.tbl_deep_extend("force", base_win_options, {
       fillchars = Config.windows.fillchars,
     }),
-    position = "top",
+    position = "bottom",
     size = {
       height = 2,
     },
   })
-
-  self.selected_files_container:mount()
+  self.containers.selected_files:mount()
 
   local function render()
     local selected_filepaths_ = self.file_selector:get_selected_filepaths()
-
     if #selected_filepaths_ == 0 then
-      if Utils.is_valid_container(self.selected_files_container) then
-        self.selected_files_container:unmount()
-        self:refresh_winids()
-      end
+      if Utils.is_valid_container(self.containers.selected_files) then self.containers.selected_files:unmount() end
       return
     end
 
-    if not Utils.is_valid_container(self.selected_files_container, true) then
+    if not Utils.is_valid_container(self.containers.selected_files, true) then
       self:create_selected_files_container()
-      self:refresh_winids()
-      if not Utils.is_valid_container(self.selected_files_container, true) then
+      if not Utils.is_valid_container(self.containers.selected_files, true) then
         Utils.warn("Failed to create or find selected files container window.")
         return
       end
@@ -3045,7 +3052,7 @@ function Sidebar:create_selected_files_container()
     end
 
     local selected_files_count = #lines_to_set ---@type integer
-    local selected_files_buf = api.nvim_win_get_buf(self.selected_files_container.winid)
+    local selected_files_buf = api.nvim_win_get_buf(self.containers.selected_files.winid)
     Utils.unlock_buf(selected_files_buf)
     api.nvim_buf_clear_namespace(selected_files_buf, SELECTED_FILES_ICON_NAMESPACE, 0, -1)
     api.nvim_buf_set_lines(selected_files_buf, 0, -1, true, lines_to_set)
@@ -3062,9 +3069,9 @@ function Sidebar:create_selected_files_container()
 
     Utils.lock_buf(selected_files_buf)
     local win_height = self:get_selected_files_container_height()
-    api.nvim_win_set_height(self.selected_files_container.winid, win_height)
+    api.nvim_win_set_height(self.containers.selected_files.winid, win_height)
     self:render_header(
-      self.selected_files_container.winid,
+      self.containers.selected_files.winid,
       selected_files_buf,
       string.format(
         "%sSelected (%d file%s)",
@@ -3083,12 +3090,12 @@ function Sidebar:create_selected_files_container()
   local function remove_file(line_number) self.file_selector:remove_selected_filepaths_with_index(line_number) end
 
   -- Set up keybinding to remove files
-  self.selected_files_container:map("n", Config.mappings.sidebar.remove_file, function()
-    local line_number = api.nvim_win_get_cursor(self.selected_files_container.winid)[1]
+  self.containers.selected_files:map("n", Config.mappings.sidebar.remove_file, function()
+    local line_number = api.nvim_win_get_cursor(self.containers.selected_files.winid)[1]
     remove_file(line_number)
   end, { noremap = true, silent = true })
 
-  self.selected_files_container:map("x", Config.mappings.sidebar.remove_file, function()
+  self.containers.selected_files:map("x", Config.mappings.sidebar.remove_file, function()
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
     local start_line = math.min(vim.fn.line("v"), vim.fn.line("."))
     local end_line = math.max(vim.fn.line("v"), vim.fn.line("."))
@@ -3097,7 +3104,7 @@ function Sidebar:create_selected_files_container()
     end
   end, { noremap = true, silent = true })
 
-  self.selected_files_container:map(
+  self.containers.selected_files:map(
     "n",
     Config.mappings.sidebar.add_file,
     function() self.file_selector:open() end,
@@ -3105,10 +3112,12 @@ function Sidebar:create_selected_files_container()
   )
 
   -- Set up autocmd to show hint on cursor move
-  self.selected_files_container:on({ event.CursorMoved }, function() self:show_selected_files_hint() end, {})
+  self.containers.selected_files:on({ event.CursorMoved }, function() self:show_selected_files_hint() end, {})
 
   -- Clear hint when leaving the window
-  self.selected_files_container:on(event.BufLeave, function() self:close_selected_files_hint() end, {})
+  self.containers.selected_files:on(event.BufLeave, function() self:close_selected_files_hint() end, {})
+
+  self:setup_window_navigation(self.containers.selected_files)
 
   render()
 end
@@ -3116,18 +3125,17 @@ end
 function Sidebar:create_todos_container()
   local history = Path.history.load(self.code.bufnr)
   if not history or not history.todos or #history.todos == 0 then
-    if self.todos_container then self.todos_container:unmount() end
-    self.todos_container = nil
+    if self.containers.todos then self.containers.todos:unmount() end
+    self.containers.todos = nil
     self:adjust_layout()
-    self:refresh_winids()
     return
   end
-  if not Utils.is_valid_container(self.todos_container, true) then
-    self.todos_container = Split({
+  if not Utils.is_valid_container(self.containers.todos, true) then
+    self.containers.todos = Split({
       enter = false,
       relative = {
         type = "win",
-        winid = self.input_container.winid,
+        winid = self:get_split_candidate("todos"),
       },
       buf_options = vim.tbl_deep_extend("force", buf_options, {
         modifiable = false,
@@ -3139,12 +3147,13 @@ function Sidebar:create_todos_container()
       win_options = vim.tbl_deep_extend("force", base_win_options, {
         fillchars = Config.windows.fillchars,
       }),
-      position = "top",
+      position = "bottom",
       size = {
         height = 3,
       },
     })
-    self.todos_container:mount()
+    self.containers.todos:mount()
+    self:setup_window_navigation(self.containers.todos)
   end
   local done_count = 0
   local total_count = #history.todos
@@ -3163,20 +3172,19 @@ function Sidebar:create_todos_container()
     table.insert(todos_content_lines, line)
   end
   if focused_idx > #todos_content_lines then focused_idx = #todos_content_lines end
-  local todos_buf = api.nvim_win_get_buf(self.todos_container.winid)
+  local todos_buf = api.nvim_win_get_buf(self.containers.todos.winid)
   Utils.unlock_buf(todos_buf)
   api.nvim_buf_set_lines(todos_buf, 0, -1, false, todos_content_lines)
-  api.nvim_win_set_cursor(self.todos_container.winid, { focused_idx, 0 })
+  api.nvim_win_set_cursor(self.containers.todos.winid, { focused_idx, 0 })
   Utils.lock_buf(todos_buf)
   self:render_header(
-    self.todos_container.winid,
+    self.containers.todos.winid,
     todos_buf,
     Utils.icon(" ") .. "Todos" .. " (" .. done_count .. "/" .. total_count .. ")",
     Highlights.SUBTITLE,
     Highlights.REVERSED_SUBTITLE
   )
   self:adjust_layout()
-  self:refresh_winids()
 end
 
 function Sidebar:adjust_layout()
