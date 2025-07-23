@@ -1364,9 +1364,8 @@ function Sidebar:on_mount(opts)
           -- Treesitter highlighting is active in the code buffer, activate it
           -- it in code selection buffer as well.
           local filetype = vim.bo[self.code.bufnr].filetype
-          if filetype and filetype ~= "" then
-            vim.treesitter.start(selected_code_buf, vim.bo[self.code.bufnr].filetype)
-          end
+          local lang = vim.treesitter.language.get_lang(filetype or "")
+          if lang and lang ~= "" then vim.treesitter.start(selected_code_buf, lang) end
         end
         -- Try the old syntax highlighting
         local syntax = api.nvim_get_option_value("syntax", { buf = self.code.bufnr })
@@ -2446,6 +2445,10 @@ function Sidebar:create_input_container()
         return
       end
     end
+
+    -- Process shortcut replacements
+    local new_content, has_shortcuts = Utils.extract_shortcuts(request)
+    if has_shortcuts then request = new_content end
 
     local selected_filepaths = self.file_selector:get_selected_filepaths()
 
