@@ -197,7 +197,7 @@ end
 
 function Sidebar:set_code_winhl()
   if not self.code.winid or not api.nvim_win_is_valid(self.code.winid) then return end
-  if not self.containers.result or not api.nvim_win_is_valid(self.containers.result.winid) then return end
+  if not Utils.is_valid_container(self.containers.result, true) then return end
 
   if Utils.should_hidden_border(self.code.winid, self.containers.result.winid) then
     Utils.debug("setting winhl")
@@ -1017,23 +1017,15 @@ function Sidebar:render_input(ask)
 end
 
 function Sidebar:render_selected_code()
+  if not self.code.selection then return end
   if not Utils.is_valid_container(self.containers.selected_code) then return end
 
-  local selected_code_lines_count = 0
-  local selected_code_max_lines_count = 5
+  local count = Utils.count_lines(self.code.selection.content)
+  local max_shown = api.nvim_win_get_height(self.containers.selected_code.winid)
+  if Config.windows.sidebar_header.enabled then max_shown = max_shown - 1 end
 
-  if self.code.selection ~= nil then
-    local selected_code_lines = vim.split(self.code.selection.content, "\n")
-    selected_code_lines_count = #selected_code_lines
-  end
-
-  local header_text = Utils.icon(" ")
-    .. "Selected Code"
-    .. (
-      selected_code_lines_count > selected_code_max_lines_count
-        and " (Show only the first " .. tostring(selected_code_max_lines_count) .. " lines)"
-      or ""
-    )
+  local header_text = Utils.icon(" ") .. "Selected Code"
+  if max_shown < count then header_text = string.format("%s (%d/%d lines)", header_text, max_shown, count) end
 
   self:render_header(
     self.containers.selected_code.winid,
@@ -1367,8 +1359,17 @@ function Sidebar:on_mount(opts)
         Utils.lock_buf(selected_code_buf)
       end
       if self.code.bufnr and api.nvim_buf_is_valid(self.code.bufnr) then
-        local filetype = api.nvim_get_option_value("filetype", { buf = self.code.bufnr })
-        api.nvim_set_option_value("filetype", filetype, { buf = selected_code_buf })
+        local ts_ok, ts_highlighter = pcall(require, "vim.treesitter.highlighter")
+        if ts_ok and ts_highlighter.active[self.code.bufnr] then
+          -- Treesitter highlighting is active in the code buffer, activate it
+          -- it in code selection buffer as well.
+          local filetype = vim.bo[self.code.bufnr].filetype
+          local lang = vim.treesitter.language.get_lang(filetype or "")
+          if lang and lang ~= "" then vim.treesitter.start(selected_code_buf, lang) end
+        end
+        -- Try the old syntax highlighting
+        local syntax = api.nvim_get_option_value("syntax", { buf = self.code.bufnr })
+        if syntax and syntax ~= "" then api.nvim_set_option_value("syntax", syntax, { buf = selected_code_buf }) end
       end
     end
   end
@@ -1724,8 +1725,7 @@ local function _get_message_lines(message, messages, ctx)
     return res
   end
   if message.message.role == "assistant" then
-    local content = message.message.content
-    if type(content) == "table" and content[1].type == "tool_use" then return lines end
+    if History.Helpers.is_tool_use_message(message) then return lines end
     local text = table.concat(vim.tbl_map(function(line) return tostring(line) end, lines), "\n")
     local transformed = transform_result_content(text, ctx.prev_filepath)
     ctx.prev_filepath = transformed.current_filepath
@@ -2081,12 +2081,9 @@ function Sidebar:add_history_messages(messages)
   end
   local last_message = messages[#messages]
   if last_message then
-    local content = last_message.message.content
-    if type(content) == "table" and content[1].type == "tool_use" then
+    if History.Helpers.is_tool_use_message(last_message) then
       self.current_state = "tool calling"
-    elseif type(content) == "table" and content[1].type == "thinking" then
-      self.current_state = "thinking"
-    elseif type(content) == "table" and content[1].type == "redacted_thinking" then
+    elseif History.Helpers.is_thinking_message(last_message) then
       self.current_state = "thinking"
     else
       self.current_state = "generating"
@@ -2098,6 +2095,7 @@ function Sidebar:add_history_messages(messages)
   end)
 end
 
+-- FIXME: this is used by external plugin users
 ---@param messages AvanteLLMMessage | AvanteLLMMessage[]
 ---@param options {visible?: boolean}
 function Sidebar:add_chat_history(messages, options)
@@ -2106,25 +2104,18 @@ function Sidebar:add_chat_history(messages, options)
   local is_first_user = true
   local history_messages = {}
   for _, message in ipairs(messages) do
-    local content = message.content
-    if message.role == "system" and type(content) == "string" then
-      ---@cast content string
-      self.chat_history.system_prompt = content
-      goto continue
-    end
-    local history_message = History.Message:new(message)
-    if message.role == "user" and is_first_user then
-      is_first_user = false
-      history_message.is_user_submission = true
-      history_message.provider = Config.provider
-      history_message.model = Config.get_provider_config(Config.provider).model
-    end
-    table.insert(history_messages, history_message)
-    ::continue::
-  end
-  if options.visible ~= nil then
-    for _, history_message in ipairs(history_messages) do
-      history_message.visible = options.visible
+    local role = message.role
+    if role == "system" and type(message.content) == "string" then
+      self.chat_history.system_prompt = message.content --[[@as string]]
+    else
+      ---@type AvanteLLMMessageContentItem
+      local content = type(message.content) ~= "table" and message.content or message.content[1]
+      local msg_opts = { visible = options.visible }
+      if role == "user" and is_first_user then
+        msg_opts.is_user_submission = true
+        is_first_user = false
+      end
+      table.insert(history_messages, History.Message:new(role, content, msg_opts))
     end
   end
   self:add_history_messages(history_messages)
@@ -2145,7 +2136,7 @@ function Sidebar:create_selected_code_container()
         type = "win",
         winid = self:get_split_candidate("selected_code"),
       },
-      buf_options = buf_options,
+      buf_options = vim.tbl_deep_extend("force", buf_options, { filetype = "AvanteSelectedCode" }),
       win_options = vim.tbl_deep_extend("force", base_win_options, {}),
       size = {
         height = height,
@@ -2419,7 +2410,7 @@ function Sidebar:create_input_container()
 
     if self.is_generating then
       self:add_history_messages({
-        History.Message:new({ role = "user", content = request }),
+        History.Message:new("user", request),
       })
       return
     end
@@ -2454,6 +2445,10 @@ function Sidebar:create_input_container()
         return
       end
     end
+
+    -- Process shortcut replacements
+    local new_content, has_shortcuts = Utils.extract_shortcuts(request)
+    if has_shortcuts then request = new_content end
 
     local selected_filepaths = self.file_selector:get_selected_filepaths()
 
@@ -2514,24 +2509,18 @@ function Sidebar:create_input_container()
     ---@param state AvanteLLMToolUseState
     local function on_tool_log(tool_id, tool_name, log, state)
       if state == "generating" then on_state_change("tool calling") end
-      local tool_use_message = nil
-      for idx = #self.chat_history.messages, 1, -1 do
-        local message = self.chat_history.messages[idx]
-        local content = message.message.content
-        if type(content) == "table" and content[1].type == "tool_use" and content[1].id == tool_id then
-          tool_use_message = message
-          break
-        end
-      end
+      local tool_use_message = History.Helpers.get_tool_use_message(tool_id, self.chat_history.messages)
       if not tool_use_message then
         -- Utils.debug("tool_use message not found", tool_id, tool_name)
         return
       end
+
       local tool_use_logs = tool_use_message.tool_use_logs or {}
       local content = string.format("[%s]: %s", tool_name, log)
       table.insert(tool_use_logs, content)
-      local orig_is_calling = tool_use_message.is_calling
       tool_use_message.tool_use_logs = tool_use_logs
+
+      local orig_is_calling = tool_use_message.is_calling
       tool_use_message.is_calling = true
       self:update_content("")
       tool_use_message.is_calling = orig_is_calling
@@ -2539,20 +2528,13 @@ function Sidebar:create_input_container()
     end
 
     local function set_tool_use_store(tool_id, key, value)
-      local tool_use_message = nil
-      for idx = #self.chat_history.messages, 1, -1 do
-        local message = self.chat_history.messages[idx]
-        local content = message.message.content
-        if type(content) == "table" and content[1].type == "tool_use" and content[1].id == tool_id then
-          tool_use_message = message
-          break
-        end
+      local tool_use_message = History.Helpers.get_tool_use_message(tool_id, self.chat_history.messages)
+      if tool_use_message then
+        local tool_use_store = tool_use_message.tool_use_store or {}
+        tool_use_store[key] = value
+        tool_use_message.tool_use_store = tool_use_store
+        self:save_history()
       end
-      if not tool_use_message then return end
-      local tool_use_store = tool_use_message.tool_use_store or {}
-      tool_use_store[key] = value
-      tool_use_message.tool_use_store = tool_use_store
-      self:save_history()
     end
 
     ---@type AvanteLLMStopCallback
@@ -2570,10 +2552,7 @@ function Sidebar:create_input_container()
         local msg_content = stop_opts.error
         if type(msg_content) ~= "string" then msg_content = vim.inspect(msg_content) end
         self:add_history_messages({
-          History.Message:new({
-            role = "assistant",
-            content = "\n\nError: " .. msg_content,
-          }, {
+          History.Message:new("assistant", "\n\nError: " .. msg_content, {
             just_for_display = true,
           }),
         })
@@ -2601,10 +2580,7 @@ function Sidebar:create_input_container()
 
     if request and request ~= "" then
       self:add_history_messages({
-        History.Message:new({
-          role = "user",
-          content = request,
-        }, {
+        History.Message:new("user", request, {
           is_user_submission = true,
           selected_filepaths = selected_filepaths,
           selected_code = selected_code,
@@ -2829,6 +2805,7 @@ function Sidebar:create_input_container()
   })
 end
 
+-- FIXME: this is used by external plugin users
 ---@param value string
 function Sidebar:set_input_value(value)
   if not self.containers.input then return end
@@ -2844,17 +2821,14 @@ function Sidebar:get_input_value()
 end
 
 function Sidebar:get_selected_code_container_height()
-  local selected_code_max_lines_count = 5
+  if not self.code.selection then return 0 end
 
-  local selected_code_size = 0
+  local max_height = 5
 
-  if self.code.selection ~= nil then
-    local selected_code_lines = vim.split(self.code.selection.content, "\n")
-    local selected_code_lines_count = #selected_code_lines + 1
-    selected_code_size = math.min(selected_code_lines_count, selected_code_max_lines_count)
-  end
+  local count = Utils.count_lines(self.code.selection.content)
+  if Config.windows.sidebar_header.enabled then count = count + 1 end
 
-  return selected_code_size
+  return math.min(count, max_height)
 end
 
 function Sidebar:get_todos_container_height()

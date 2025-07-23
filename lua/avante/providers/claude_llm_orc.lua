@@ -14,11 +14,8 @@ local llm_orc_config_dir = Path:new(vim.fn.expand("~/.config/llm-orc"))
 local llm_orc_credentials_file = llm_orc_config_dir:joinpath("credentials.yaml")
 local llm_orc_encryption_key_file = llm_orc_config_dir:joinpath(".encryption_key")
 
--- Inherit from Claude provider (for utility functions)
--- setmetatable(M, { __index = Claude })
-
-M.api_key_name = nil  -- nil로 설정하여 require_api_key가 false를 반환하도록 함
-M.tokenizer_id = "gpt-4o"  -- claude tokenizer가 없으므로 gpt-4o 사용
+M.api_key_name = nil
+M.tokenizer_id = "gpt-4o"
 M.support_prompt_caching = true
 M.role_map = {
   user = "user",
@@ -30,23 +27,15 @@ function M.parse_api_key()
   return nil
 end
 
--- Needed functions from Claude provider
+-- Use Claude's tool transformation
 function M:transform_tool(tool)
-  local input_schema_properties, required = Utils.llm_tool_param_fields_to_json_schema(tool.param.fields)
-  return {
-    name = tool.name,
-    description = tool.get_description and tool.get_description() or tool.description,
-    input_schema = {
-      type = "object",
-      properties = input_schema_properties,
-      required = required,
-    },
-  }
+  return Claude:transform_tool(tool)
 end
 
 function M:is_disable_stream() return false end
 
 function M:parse_messages(opts)
+  -- Same as before - reuse existing logic
   local messages = {}
   local provider_conf, _ = Providers.parse_config(self)
 
@@ -71,14 +60,6 @@ function M:parse_messages(opts)
     end
   end
 
-  -- 디버그 로깅
-  -- if vim.g.avante_debug then
-  --   if has_selected_code then
-  --     Utils.info("LLM-ORC: Selected code detected")
-  --   end
-  --   Utils.info("LLM-ORC: Context length = " .. #context_content)
-  -- end
-
   -- 강제로 .avanterules 지침 추가 (OAuth 제약 우회)
   local forced_instructions = [[
 You are a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices.
@@ -92,16 +73,24 @@ Make sure code comments are in English when generating them.
 
 ====
 
+IMPORTANT: 도구 사용 제한
+- 사용자가 단순한 질문이나 코드 설명을 요청할 때는 도구를 사용하지 마세요.
+- 파일 내용이 이미 컨텍스트로 제공된 경우 view 도구를 사용하지 마세요.
+- 간단한 답변이 가능한 경우 직접 답변하세요.
+
+====
+
 선택된 코드 처리:
 - 사용자가 코드 블록을 선택하고 <leader>ae를 누르면 <selected_code> 태그로 전달됩니다.
 - 이 선택된 코드를 기반으로 작업해야 합니다.
 - 선택된 코드가 있을 때는 해당 코드를 수정하거나 개선하는 것이 주요 목적입니다.
+- 코드 수정 후에는 반드시 <code></code> 태그로 수정된 코드를 제공하세요.
 
 ====
 
 TOOLS USAGE GUIDE
 
-- You have access to tools, but only use them when necessary. If a tool is not required, respond as normal.
+- You have access to tools, but only use them when absolutely necessary. If a tool is not required, respond as normal.
 - Please DON'T be so aggressive in using tools, as many tasks can be better completed without tools.
 - Files will be provided to you as context through <file> tag!
 - Before using the `view` tool each time, always repeatedly check whether the file is already in the <file> tag. If it is already there, do not use the `view` tool, just read the file content directly from the <file> tag.
@@ -138,7 +127,7 @@ Memory is crucial, you must follow the instructions in <memory>!
 
   local has_tool_use = false
   local first_user_msg_processed = false
-
+  
   -- Claude.lua와 동일한 방식으로 처리 (context 메시지 제외)
   for _, message in ipairs(opts.messages) do
     -- context 메시지는 건너뛰기 (시스템 프롬프트에서 처리)
@@ -158,6 +147,7 @@ Memory is crucial, you must follow the instructions in <memory>!
             -- 선택된 코드가 있으면 최우선으로 추가
             if has_selected_code and selected_code_content ~= "" then
               full_content = full_content .. "\n\n=== 선택된 코드 (이 코드를 기반으로 작업하세요) ===\n" .. selected_code_content
+              full_content = full_content .. "\n\n위의 선택된 코드를 수정하거나 개선한 결과를 <code></code> 태그로 제공하세요."
             end
 
             -- 일반 context가 있으면 추가 (토큰 제한 고려)
@@ -224,7 +214,7 @@ end
 ---@field oauth_token table?
 M.state = nil
 
--- Decrypt LLM-ORC credentials
+-- Decrypt LLM-ORC credentials (same as before)
 local function decrypt_credentials()
   -- Check if files exist
   if not llm_orc_credentials_file:exists() or not llm_orc_encryption_key_file:exists() then
@@ -289,48 +279,10 @@ except Exception as e:
 end
 
 function M:parse_curl_args(prompt_opts)
-  -- 강제 디버그 출력 (vim.notify 사용) - 주석 처리
-  -- local user_count = 0
-  -- local assistant_count = 0
-  -- local context_count = 0
-  -- local avanterules_found = false
-  -- local tools_count = 0
-
-  -- for _, msg in ipairs(prompt_opts.messages or {}) do
-  --   if msg.is_context then
-  --     context_count = context_count + 1
-  --     -- .avanterules 관련 내용 확인
-  --     if msg.content and (msg.content:match("제1원칙") or msg.content:match("한글로")) then
-  --       avanterules_found = true
-  --     end
-  --   elseif msg.role == "user" then
-  --     user_count = user_count + 1
-  --   elseif msg.role == "assistant" then
-  --     assistant_count = assistant_count + 1
-  --   end
-  -- end
-
-  -- -- Tools 확인
-  -- if prompt_opts.tools then
-  --   tools_count = #prompt_opts.tools
-  -- end
-
-  -- vim.notify(string.format("LLM-ORC Debug: Messages - user:%d, assistant:%d, context:%d, avanterules:%s, tools:%d",
-  --   user_count, assistant_count, context_count, tostring(avanterules_found), tools_count), vim.log.levels.WARN)
-
-  -- 디버그: prompt_opts 구조 확인 - 주석 처리
-  -- if vim.g.avante_debug then
-  --   Utils.info("LLM-ORC: prompt_opts.messages count = " .. #(prompt_opts.messages or {}))
-  --   Utils.info("LLM-ORC: prompt_opts.system_prompt = " .. (prompt_opts.system_prompt or "nil"))
-  --   -- Utils.info(string.format("LLM-ORC: Messages - user:%d, assistant:%d, context:%d, avanterules:%s",
-  --   --   user_count, assistant_count, context_count, tostring(avanterules_found)))
-  -- end
-
   -- Load OAuth token from LLM-ORC if not already loaded
   if not M.state or not M.state.oauth_token then
     local token_data, err = decrypt_credentials()
     if not token_data then
-      -- Utils.error(err)
       error("Failed to load LLM-ORC credentials")
     end
 
@@ -338,11 +290,27 @@ function M:parse_curl_args(prompt_opts)
     M.state.oauth_token = token_data
   end
 
-  -- Check if token is expired
+  -- Check if token is expired and refresh if needed
   local now = os.time()
-  -- if M.state.oauth_token.expires_at and M.state.oauth_token.expires_at <= now then
-  --   Utils.warn("LLM-ORC OAuth token is expired. Please refresh with: llm-orc auth add anthropic-claude-pro-max")
-  -- end
+  if M.state.oauth_token.expires_at and M.state.oauth_token.expires_at <= now then
+    -- 토큰이 만료되었으면 credentials를 다시 로드
+    local token_data, err = decrypt_credentials()
+    if not token_data then
+      Utils.error("OAuth token expired and failed to reload: " .. (err or "unknown error"))
+      error("Failed to reload expired OAuth token")
+    end
+    
+    -- 새로운 토큰도 만료되었는지 확인
+    if token_data.expires_at and token_data.expires_at <= now then
+      Utils.error("LLM-ORC OAuth token is expired. Please refresh with: llm-orc auth add anthropic-claude-pro-max")
+      error("OAuth token is expired")
+    end
+    
+    M.state.oauth_token = token_data
+    if vim.g.avante_debug then
+      Utils.info("LLM-ORC: Reloaded OAuth token successfully")
+    end
+  end
 
   local provider_conf, request_body = Providers.parse_config(self)
   local disable_tools = provider_conf.disable_tools or false
@@ -352,7 +320,6 @@ function M:parse_curl_args(prompt_opts)
 
   -- OAuth requires EXACTLY this system prompt - cannot be modified
   local system_prompt = "You are Claude Code, Anthropic's official CLI for Claude."
-  -- Additional prompts from .avanterules cannot be added with OAuth
 
   -- Tools 파싱 (claude.lua와 동일)
   local tools = {}
@@ -382,55 +349,21 @@ function M:parse_curl_args(prompt_opts)
     }, request_body),
   }
 
-  -- Debug logging
-  -- Utils.info("LLM-ORC OAuth provider loaded successfully!")
-
-  -- Always save debug info
-  -- if vim.g.avante_debug then
-  --   local debug_file = "/tmp/avante_llm_orc_debug.json"
-  --   local f = io.open(debug_file, "w")
-  --   if f then
-  --     f:write(vim.json.encode({
-  --       headers = curl_args.headers,
-  --       url = curl_args.url,
-  --       body = curl_args.body,
-  --       original_messages = prompt_opts.messages,
-  --       parsed_messages = messages,
-  --       has_selected_code = has_selected_code
-  --     }))
-  --     f:close()
-  --     Utils.info("LLM-ORC Debug saved to: " .. debug_file)
-  --   end
-  -- end
-
-  -- if vim.g.avante_debug then
-  --   Utils.info("LLM-ORC Headers: " .. vim.inspect(curl_args.headers))
-  --   Utils.info("LLM-ORC URL: " .. curl_args.url)
-  --   Utils.info("LLM-ORC Model: " .. curl_args.body.model)
-  --   Utils.info("LLM-ORC Token: Bearer " .. M.state.oauth_token.access_token:sub(1, 20) .. "...")
-  --   Utils.info("LLM-ORC Debug saved to: " .. debug_file)
-  -- end
-
   return curl_args
 end
 
 function M.is_env_set()
-  -- Check if LLM-ORC credentials exist
   return llm_orc_credentials_file:exists() and llm_orc_encryption_key_file:exists()
 end
 
 function M.setup()
-  -- Utils.info("LLM-ORC: setup() called")
-
   if not M.is_env_set() then
-    -- Utils.warn("LLM-ORC credentials not found. Please run: llm-orc auth add anthropic-claude-pro-max")
     return
   end
 
   -- Try to load credentials
   local token_data, err = decrypt_credentials()
   if not token_data then
-    -- Utils.error(err)
     return
   end
 
@@ -438,18 +371,10 @@ function M.setup()
 
   require("avante.tokenizers").setup(M.tokenizer_id)
   vim.g.avante_claude_llm_orc_login = true
-
-  -- Utils.info("LLM-ORC: setup() completed successfully")
 end
 
--- Error handling
+-- Error handling (same as before)
 function M.on_error(result)
-  -- Debug: Log error
-  -- Utils.warn("LLM-ORC Error - Status: " .. tostring(result.status))
-  -- if result.body then
-  --   Utils.warn("LLM-ORC Error Body: " .. result.body:sub(1, 200))
-  -- end
-
   if result.status == 429 then return end
   if not result.body then
     return Utils.error("API request failed with status " .. result.status, { once = true, title = "Avante" })
@@ -470,209 +395,196 @@ function M.on_error(result)
   -- OAuth 시스템 프롬프트 변경 관련 에러 처리
   if error_type == "invalid_request_error" and (error_msg:match("system") or error_msg:match("Claude Code")) then
     Utils.warn("System prompt modification failed. Using fallback mode.")
-    -- 여기서 fallback을 트리거할 수 있지만, 일단 에러는 표시
     error_msg = "System prompt modification not supported. " .. error_msg
   end
 
   Utils.error(error_msg, { once = true, title = "Avante" })
 end
 
--- Stream parsing - using Claude's format (ctx, data_stream, event_state, opts)
+-- OAuth 전용 파서: API 키 없이 동작하는 완전 자체 구현
 function M:parse_response(ctx, data_stream, event_state, opts)
-  -- Claude provider 형식과 동일하게 처리
   if not data_stream or data_stream == "" then return end
-
-  -- Initialize content_blocks if needed
-  if ctx.content_blocks == nil then ctx.content_blocks = {} end
-
+  
   local ok, json = pcall(vim.json.decode, data_stream)
   if not ok then return end
-
-  -- Debug
-  -- if vim.g.avante_debug then
-  --   Utils.info(string.format("LLM-ORC: Parsing %s", json.type or "unknown"))
-  -- end
-
+  
+  if ctx.content_blocks == nil then ctx.content_blocks = {} end
+  
   if json.type == "message_start" then
     if json.message then
-      ctx.message_id = json.message.id
-      ctx.role = json.message.role or ctx.role
-      if json.message.usage and opts.update_tokens_usage then
-        opts.update_tokens_usage(json.message.usage)
-      end
+      ctx.usage = json.message.usage
     end
+    
   elseif json.type == "content_block_start" then
     local content_block = json.content_block or {}
-    content_block.stopped = false
     ctx.content_blocks[json.index + 1] = content_block
-
-    if content_block.type == "text" then
-      local msg = HistoryMessage:new({
-        role = "assistant",
-        content = content_block.text or "",
-      }, {
-        state = "generating",
-        turn_id = ctx.turn_id,
-      })
-      content_block.uuid = msg.uuid
-      if opts.on_messages_add then opts.on_messages_add({ msg }) end
-    elseif content_block.type == "tool_use" and opts.on_messages_add then
-      -- Tool use 처리 (attempt_completion 등)
-      -- claude.lua와 동일하게 처리
-      local incomplete_json = nil  -- OAuth는 input_json을 제공하지 않을 수 있음
-      if content_block.input_json then
-        incomplete_json = vim.json.decode(content_block.input_json)
+    
+    -- thinking 처리
+    if content_block.type == "thinking" then
+      if opts.on_chunk then opts.on_chunk("<think>\n") end
+      if opts.on_messages_add then
+        local msg = HistoryMessage:new("assistant", {
+          type = "thinking",
+          thinking = content_block.thinking or "",
+          signature = content_block.signature,
+        }, {
+          state = "generating",
+          turn_id = ctx.turn_id,
+        })
+        content_block.uuid = msg.uuid
+        opts.on_messages_add({ msg })
       end
-      local msg = HistoryMessage:new({
-        role = "assistant",
-        content = {
-          {
-            type = "tool_use",
-            name = content_block.name,
-            id = content_block.id,
-            input = incomplete_json or {},
-          },
-        },
-      }, {
-        state = "generating",
-        turn_id = ctx.turn_id,
-      })
-      content_block.uuid = msg.uuid
-      opts.on_messages_add({ msg })
+    -- text 처리 추가
+    elseif content_block.type == "text" then
+      content_block.text = content_block.text or ""
+      if opts.on_messages_add then
+        local msg = HistoryMessage:new("assistant", content_block.text or "", {
+          state = "generating",
+          turn_id = ctx.turn_id,
+        })
+        content_block.uuid = msg.uuid
+        opts.on_messages_add({ msg })
+      end
+    -- tool_use 처리 추가
+    elseif content_block.type == "tool_use" then
+      content_block.input = content_block.input or {}
+      if opts.on_messages_add then
+        local msg = HistoryMessage:new("assistant", {
+          type = "tool_use",
+          name = content_block.name,
+          id = content_block.id,
+          input = content_block.input,
+        }, {
+          state = "generating",
+          turn_id = ctx.turn_id,
+        })
+        content_block.uuid = msg.uuid
+        opts.on_messages_add({ msg })
+      end
     end
+    
   elseif json.type == "content_block_delta" then
     local content_block = ctx.content_blocks[json.index + 1]
     if not content_block then return end
-
-    if json.delta and json.delta.type == "text_delta" and json.delta.text then
-      -- Accumulate text
+    
+    -- thinking_delta 처리
+    if json.delta and json.delta.type == "thinking_delta" then
+      content_block.thinking = (content_block.thinking or "") .. json.delta.thinking
+      if opts.on_chunk then opts.on_chunk(json.delta.thinking) end
+      if opts.on_messages_add then
+        local msg = HistoryMessage:new("assistant", {
+          type = "thinking",
+          thinking = content_block.thinking,
+          signature = content_block.signature,
+        }, {
+          state = "generating",
+          uuid = content_block.uuid,
+          turn_id = ctx.turn_id,
+        })
+        opts.on_messages_add({ msg })
+      end
+    -- text_delta 처리 추가
+    elseif json.delta and json.delta.type == "text_delta" and json.delta.text then
       content_block.text = (content_block.text or "") .. json.delta.text
-
-      -- Send chunk if on_chunk exists (for other uses)
-      if opts.on_chunk then
-        opts.on_chunk(json.delta.text)
-      end
-
-      -- Update message
-      local msg = HistoryMessage:new({
-        role = "assistant",
-        content = content_block.text,
-      }, {
-        state = "generating",
-        uuid = content_block.uuid,
-        turn_id = ctx.turn_id,
-      })
-      if opts.on_messages_add then opts.on_messages_add({ msg }) end
-    elseif json.delta and json.delta.type == "input_json_delta" then
-      -- Tool use input delta
-      if not content_block.input_json then content_block.input_json = "" end
-      content_block.input_json = content_block.input_json .. json.delta.partial_json
-    end
-  elseif json.type == "content_block_stop" then
-    local content_block = ctx.content_blocks[json.index + 1]
-    if content_block then
-      content_block.stopped = true
-
-      if content_block.type == "text" then
-        local msg = HistoryMessage:new({
-          role = "assistant",
-          content = content_block.text or "",
-        }, {
-          state = "generated",
+      if opts.on_chunk then opts.on_chunk(json.delta.text) end
+      if opts.on_messages_add then
+        local msg = HistoryMessage:new("assistant", content_block.text, {
+          state = "generating",
           uuid = content_block.uuid,
           turn_id = ctx.turn_id,
         })
-        if opts.on_messages_add then opts.on_messages_add({ msg }) end
-      elseif content_block.type == "tool_use" then
-        -- Tool use 완료 처리
-        local complete_json = nil
-        if content_block.input_json then
-          local ok, parsed = pcall(vim.json.decode, content_block.input_json)
-          if ok then complete_json = parsed end
-        end
-
-        -- claude.lua와 동일하게 모든 tool_use 처리
-        local msg = HistoryMessage:new({
-          role = "assistant",
-          content = {
-            {
-              type = "tool_use",
-              name = content_block.name,
-              id = content_block.id,
-              input = complete_json or {},
-            },
-          },
-        }, {
-          state = "generated",
-          uuid = content_block.uuid,
-          turn_id = ctx.turn_id,
-        })
-        if opts.on_messages_add then opts.on_messages_add({ msg }) end
+        opts.on_messages_add({ msg })
       end
-    end
-  elseif json.type == "message_delta" then
-    -- Handle stop reason differently
-    if json.delta and json.delta.stop_reason then
-      -- Mark all content blocks as completed
-      for _, content_block in ipairs(ctx.content_blocks or {}) do
-        if content_block.type == "text" and content_block.uuid then
-          local msg = HistoryMessage:new({
-            role = "assistant",
-            content = content_block.text or "",
+    -- input_json_delta 처리 추가 (tool_use의 input 파라미터)
+    elseif json.delta and json.delta.type == "input_json_delta" and content_block.type == "tool_use" then
+      local partial_json = json.delta.partial_json or ""
+      content_block.input_json = (content_block.input_json or "") .. partial_json
+      
+      -- JSON 파싱 시도
+      local ok, parsed_input = pcall(vim.json.decode, content_block.input_json)
+      if ok then
+        content_block.input = parsed_input
+        if opts.on_messages_add then
+          local msg = HistoryMessage:new("assistant", {
+            type = "tool_use",
+            name = content_block.name,
+            id = content_block.id,
+            input = content_block.input,
           }, {
-            state = "generated",
+            state = "generating",
             uuid = content_block.uuid,
             turn_id = ctx.turn_id,
           })
-          if opts.on_messages_add then opts.on_messages_add({ msg }) end
-        end
-      end
-
-      -- if vim.g.avante_debug then
-      --   Utils.info("LLM-ORC: Stop reason - " .. json.delta.stop_reason)
-      -- end
-
-      -- 중요: 반드시 on_stop을 호출하여 생성 상태를 종료
-      if json.delta.stop_reason == "end_turn" then
-        if opts.on_stop then
-          opts.on_stop({ reason = "complete", usage = json.usage })
-        end
-      elseif json.delta.stop_reason == "max_tokens" then
-        if opts.on_stop then
-          opts.on_stop({ reason = "max_tokens", usage = json.usage })
-        end
-      elseif json.delta.stop_reason == "tool_use" then
-        if opts.on_stop then
-          opts.on_stop({ reason = "tool_use", usage = json.usage })
+          opts.on_messages_add({ msg })
         end
       end
     end
-    if json.usage and opts.update_tokens_usage then
-      opts.update_tokens_usage(json.usage)
-    end
-  elseif json.type == "message_stop" then
-    -- Ensure all messages are marked as completed
-    for _, content_block in ipairs(ctx.content_blocks or {}) do
-      if content_block.type == "text" and content_block.uuid and not content_block.stopped then
-        local msg = HistoryMessage:new({
-          role = "assistant",
-          content = content_block.text or "",
+    
+  elseif json.type == "content_block_stop" then
+    local content_block = ctx.content_blocks[json.index + 1]
+    if content_block and content_block.type == "thinking" then
+      if opts.on_chunk then
+        local thinking_text = content_block.thinking or ""
+        if thinking_text ~= "" and thinking_text:sub(-1) ~= "\n" then
+          opts.on_chunk("\n</think>\n\n")
+        else
+          opts.on_chunk("</think>\n\n")
+        end
+      end
+      if opts.on_messages_add then
+        local msg = HistoryMessage:new("assistant", {
+          type = "thinking",
+          thinking = content_block.thinking,
+          signature = content_block.signature,
         }, {
           state = "generated",
           uuid = content_block.uuid,
           turn_id = ctx.turn_id,
         })
-        if opts.on_messages_add then opts.on_messages_add({ msg }) end
+        opts.on_messages_add({ msg })
+      end
+    elseif content_block and content_block.type == "text" then
+      if opts.on_messages_add then
+        local msg = HistoryMessage:new("assistant", content_block.text or "", {
+          state = "generated",
+          uuid = content_block.uuid,
+          turn_id = ctx.turn_id,
+        })
+        opts.on_messages_add({ msg })
+      end
+    elseif content_block and content_block.type == "tool_use" then
+      if opts.on_messages_add then
+        local msg = HistoryMessage:new("assistant", {
+          type = "tool_use",
+          name = content_block.name,
+          id = content_block.id,
+          input = content_block.input,
+        }, {
+          state = "generated",
+          uuid = content_block.uuid,
+          turn_id = ctx.turn_id,
+        })
+        opts.on_messages_add({ msg })
       end
     end
-
-    -- Fallback: ensure on_stop is called even if message_delta didn't have stop_reason
+    
+  elseif json.type == "message_delta" then
+    if json.delta and json.delta.stop_reason and opts.on_stop then
+      local usage = nil
+      if ctx.usage then
+        usage = {
+          prompt_tokens = (ctx.usage.input_tokens or 0) + (ctx.usage.cache_creation_input_tokens or 0),
+          completion_tokens = (ctx.usage.output_tokens or 0) + (ctx.usage.cache_read_input_tokens or 0),
+        }
+      end
+      
+      local reason = json.delta.stop_reason == "end_turn" and "complete" or json.delta.stop_reason
+      opts.on_stop({ reason = reason, usage = usage })
+    end
+    
+  elseif json.type == "message_stop" then
     if opts.on_stop then
       opts.on_stop({ reason = "complete" })
-    end
-  elseif json.type == "error" then
-    if opts.on_stop then
-      opts.on_stop({ reason = "error", error = json.error })
     end
   end
 end
@@ -695,13 +607,7 @@ function M:parse_response_without_stream(data, event_state, opts)
     end
   end
 
-  if json.usage then
-    opts.on_state_change({ type = "usage", data = json.usage })
-  end
-
-  if json.stop_reason then
-    opts.on_state_change({ type = "stop_reason", data = json.stop_reason })
-  end
+  opts.on_stop({ reason = "complete" })
 end
 
 return M

@@ -4,48 +4,60 @@ local Utils = require("avante.utils")
 local M = {}
 M.__index = M
 
----@param message AvanteLLMMessage
----@param opts? {is_user_submission?: boolean, visible?: boolean, displayed_content?: string, state?: avante.HistoryMessageState, uuid?: string, selected_filepaths?: string[], selected_code?: AvanteSelectedCode, just_for_display?: boolean, is_dummy?: boolean, turn_id?: string, is_calling?: boolean, original_content?: AvanteLLMMessageContent}
+---@class avante.HistoryMessage.Opts
+---@field uuid? string
+---@field turn_id? string
+---@field state? avante.HistoryMessageState
+---@field displayed_content? string
+---@field original_content? AvanteLLMMessageContent
+---@field selected_code? AvanteSelectedCode
+---@field selected_filepaths? string[]
+---@field is_calling? boolean
+---@field is_dummy? boolean
+---@field is_user_submission? boolean
+---@field just_for_display? boolean
+---@field visible? boolean
+---
+---@param role "user" | "assistant"
+---@param content AvanteLLMMessageContentItem
+---@param opts? avante.HistoryMessage.Opts
 ---@return avante.HistoryMessage
-function M:new(message, opts)
-  opts = opts or {}
-  local obj = setmetatable({}, M)
-  obj.message = message
-  obj.uuid = opts.uuid or Utils.uuid()
-  obj.state = opts.state or "generated"
-  obj.timestamp = Utils.get_timestamp()
-  obj.is_user_submission = false
-  obj.visible = true
-  if opts.is_user_submission ~= nil then obj.is_user_submission = opts.is_user_submission end
-  if opts.visible ~= nil then obj.visible = opts.visible end
-  if opts.displayed_content ~= nil then obj.displayed_content = opts.displayed_content end
-  if opts.selected_filepaths ~= nil then obj.selected_filepaths = opts.selected_filepaths end
-  if opts.selected_code ~= nil then obj.selected_code = opts.selected_code end
-  if opts.just_for_display ~= nil then obj.just_for_display = opts.just_for_display end
-  if opts.is_dummy ~= nil then obj.is_dummy = opts.is_dummy end
-  if opts.turn_id ~= nil then obj.turn_id = opts.turn_id end
-  if opts.is_calling ~= nil then obj.is_calling = opts.is_calling end
-  if opts.original_content ~= nil then obj.original_content = opts.original_content end
-  return obj
+function M:new(role, content, opts)
+  ---@type AvanteLLMMessage
+  local message = { role = role, content = type(content) == "string" and content or { content } }
+  local obj = {
+    message = message,
+    uuid = Utils.uuid(),
+    state = "generated",
+    timestamp = Utils.get_timestamp(),
+    is_user_submission = false,
+    visible = true,
+  }
+  obj = vim.tbl_extend("force", obj, opts or {})
+  return setmetatable(obj, M)
 end
 
 ---Creates a new instance of synthetic (dummy) history message
 ---@param role "assistant" | "user"
----@param item AvanteLLMMessageContentItem | string
+---@param item AvanteLLMMessageContentItem
 ---@return avante.HistoryMessage
-function M:new_synthetic(role, item)
-  local content = type(item) == "string" and item or { item }
-  return M:new({ role = role, content = content }, { is_dummy = true })
-end
+function M:new_synthetic(role, item) return M:new(role, item, { is_dummy = true }) end
 
 ---Creates a new instance of synthetic (dummy) history message attributed to the assistant
----@param item AvanteLLMMessageContentItem | string
+---@param item AvanteLLMMessageContentItem
 ---@return avante.HistoryMessage
 function M:new_assistant_synthetic(item) return M:new_synthetic("assistant", item) end
 
 ---Creates a new instance of synthetic (dummy) history message attributed to the user
----@param item AvanteLLMMessageContentItem | string
+---@param item AvanteLLMMessageContentItem
 ---@return avante.HistoryMessage
 function M:new_user_synthetic(item) return M:new_synthetic("user", item) end
+
+---Updates content of a message as long as it is a simple text (or empty).
+---@param new_content string
+function M:update_content(new_content)
+  assert(type(self.message.content) == "string", "can only update content of simple string messages")
+  self.message.content = new_content
+end
 
 return M

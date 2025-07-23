@@ -140,14 +140,7 @@ function M.on_render(input, opts)
       end
       if summary then summary = "  " .. Utils.icon("🛠️ ") .. summary end
     else
-      local content = msg.message.content
-      if type(content) == "table" and #content > 0 and type(content[1]) == "table" and content[1].type == "text" then
-        summary = content[1].content
-      elseif type(content) == "table" and #content > 0 and type(content[1]) == "string" then
-        summary = content[1]
-      elseif type(content) == "string" then
-        summary = content
-      end
+      summary = History.Helpers.get_text_data(msg)
     end
     if summary then table.insert(tool_use_summary, summary) end
   end
@@ -155,14 +148,17 @@ function M.on_render(input, opts)
   local icon = Utils.icon("🔄 ")
   local hl = Highlights.AVANTE_TASK_RUNNING
   if result_message then
-    if result_message.message.content[1].is_error then
-      state = "failed"
-      icon = Utils.icon("❌ ")
-      hl = Highlights.AVANTE_TASK_FAILED
-    else
-      state = "completed"
-      icon = Utils.icon("✅ ")
-      hl = Highlights.AVANTE_TASK_COMPLETED
+    local result = History.Helpers.get_tool_result_data(result_message)
+    if result then
+      if result.is_error then
+        state = "failed"
+        icon = Utils.icon("❌ ")
+        hl = Highlights.AVANTE_TASK_FAILED
+      else
+        state = "completed"
+        icon = Utils.icon("✅ ")
+        hl = Highlights.AVANTE_TASK_COMPLETED
+      end
     end
   end
   local lines = {}
@@ -267,10 +263,7 @@ When you're done, provide a clear and concise summary of what you found.]]):gsub
         .. elapsed_time
         .. "s)"
       if session_ctx.on_messages_add then
-        local message = History.Message:new({
-          role = "assistant",
-          content = "\n\n" .. summary,
-        }, {
+        local message = History.Message:new("assistant", "\n\n" .. summary, {
           just_for_display = true,
         })
         session_ctx.on_messages_add({ message })
