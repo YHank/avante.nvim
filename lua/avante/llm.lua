@@ -1129,6 +1129,7 @@ function M.stream(opts)
 
   local valid_dual_boost_modes = {
     legacy = true,
+    agentic = true,
   }
 
   opts.mode = opts.mode or Config.mode
