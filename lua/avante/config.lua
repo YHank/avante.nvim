@@ -271,7 +271,7 @@ M._defaults = {
       timeout = 30000, -- Timeout in milliseconds, increase this for reasoning models
       extra_request_body = {
         temperature = 0.75,
-        max_completion_tokens = 20480, -- Increase this to include reasoning tokens (for reasoning models)
+        max_completion_tokens = 16384, -- Increase this toinclude reasoning tokens (for reasoning models); but too large default value will not fit for some models (e.g. gpt-5-chat supports at most 16384 completion tokens)
         reasoning_effort = "medium", -- low|medium|high, only used for reasoning models
       },
     },
@@ -762,6 +762,12 @@ local function apply_model_selection(config, model_name, provider_name)
   if target_provider_name ~= current_provider_name or model_name ~= current_model_name then
     config.provider = target_provider_name
     target_provider.model = model_name
+    if not target_provider.model_names then target_provider.model_names = {} end
+    for _, model_name_ in ipairs({ model_name, current_model_name }) do
+      if not vim.tbl_contains(target_provider.model_names, model_name_) then
+        table.insert(target_provider.model_names, model_name_)
+      end
+    end
     Utils.info(string.format("Using previously selected model: %s/%s", target_provider_name, model_name))
   end
 end
